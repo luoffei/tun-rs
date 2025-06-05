@@ -3,13 +3,14 @@ use std::collections::HashSet;
 use std::io;
 use std::net::IpAddr;
 use std::os::windows::io::OwnedHandle;
+use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 
 use crate::builder::DeviceConfig;
 use crate::platform::windows::netsh;
 use crate::platform::windows::tap::TapDevice;
 use crate::platform::windows::tun::TunDevice;
 use crate::platform::ETHER_ADDR_LEN;
-use crate::{Layer, ToIpv4Address, ToIpv4Netmask, ToIpv6Address, ToIpv6Netmask};
+use crate::Layer;
 
 pub(crate) enum Driver {
     Tun(TunDevice),
@@ -170,6 +171,15 @@ impl DeviceImpl {
         }
         netsh::set_interface_name(&name, value)
     }
+    /// Retrieves the interface luid of the device.
+    ///
+    /// This is used for various network configuration commands.
+    pub fn if_luid(&self) -> io::Result<NET_LUID_LH> {
+        match &self.driver {
+            Driver::Tun(tun) => Ok(tun.luid()),
+            Driver::Tap(tap) => Ok(tap.luid()),
+        }
+    }
     /// Retrieves the interface index (if_index) of the device.
     ///
     /// This is used for various network configuration commands.
@@ -200,45 +210,24 @@ impl DeviceImpl {
     /// Filters the adapter addresses by matching the device's interface index.
     pub fn addresses(&self) -> io::Result<Vec<IpAddr>> {
         let index = self.if_index()?;
-        let r = Self::get_all_adapter_address()?
-            .into_iter()
-            .filter(|v| v.index == Some(index))
-            .map(|v| v.address)
-            .collect();
-        Ok(r)
+        crate::platform::windows::ffi::addresses(index)
     }
-    /// Sets the IPv4 network address for the device.
+    /// Sets the network address for the device.
     ///
     /// This method configures the IP address, netmask, and an optional destination for the interface
-    /// using the `netsh` command.
-    pub fn set_network_address<IPv4: ToIpv4Address, Netmask: ToIpv4Netmask>(
+    pub fn add_address(
         &self,
-        address: IPv4,
-        netmask: Netmask,
-        destination: Option<IPv4>,
+        address: IpAddr,
+        netmask: IpAddr,
+        destination: Option<IpAddr>,
     ) -> io::Result<()> {
-        netsh::set_interface_ip(
-            self.if_index()?,
-            address.ipv4()?.into(),
-            netmask.netmask()?.into(),
-            destination.map(|v| v.ipv4()).transpose()?.map(|v| v.into()),
-        )
+        crate::platform::windows::ffi::add_address(self.if_index()?, address, netmask, destination)
     }
     /// Removes the specified IP address from the device.
     pub fn remove_address(&self, addr: IpAddr) -> io::Result<()> {
-        netsh::delete_interface_ip(self.if_index()?, addr)
+        crate::platform::windows::ffi::remove_address(self.if_index()?, addr)
     }
-    /// Adds an IPv6 address to the device.
-    ///
-    /// Configures the IPv6 address and netmask (converted from prefix) for the interface.
-    pub fn add_address_v6<IPv6: ToIpv6Address, Netmask: ToIpv6Netmask>(
-        &self,
-        addr: IPv6,
-        netmask: Netmask,
-    ) -> io::Result<()> {
-        let mask = netmask.netmask()?;
-        netsh::set_interface_ip(self.if_index()?, addr.ipv6()?.into(), mask.into(), None)
-    }
+
     /// Retrieves the MTU for the device (IPv4).
     ///
     /// This method uses a Windows-specific FFI function to query the MTU by interface index.
@@ -255,13 +244,13 @@ impl DeviceImpl {
         let mtu = crate::platform::windows::ffi::get_mtu_by_index(index, false)?;
         Ok(mtu as _)
     }
-    /// Sets the MTU for the device (IPv4) using the `netsh` command.
+    /// Sets the MTU for the device (IPv4).
     pub fn set_mtu(&self, mtu: u16) -> io::Result<()> {
-        netsh::set_interface_mtu(self.if_index()?, mtu as _)
+        crate::platform::windows::ffi::set_interface_mtu(self.if_luid()?, mtu as _, true)
     }
-    /// Sets the MTU for the device (IPv6) using the `netsh` command.
+    /// Sets the MTU for the device (IPv6).
     pub fn set_mtu_v6(&self, mtu: u16) -> io::Result<()> {
-        netsh::set_interface_mtu_v6(self.if_index()?, mtu as _)
+        crate::platform::windows::ffi::set_interface_mtu(self.if_luid()?, mtu as _, false)
     }
     /// Sets the MAC address for the device.
     ///
@@ -282,9 +271,9 @@ impl DeviceImpl {
             Driver::Tap(tap) => tap.get_mac(),
         }
     }
-    /// Sets the interface metric (routing cost) using the `netsh` command.
+    /// Sets the interface metric (routing cost).
     pub fn set_metric(&self, metric: u16) -> io::Result<()> {
-        netsh::set_interface_metric(self.if_index()?, metric)
+        crate::platform::windows::ffi::set_interface_metric(self.if_index()?, metric as u32)
     }
     /// Retrieves the version of the underlying driver.
     ///

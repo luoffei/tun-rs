@@ -41,7 +41,7 @@ scopeguard = "1.2.0"
 winreg = "0.55"
 widestring = "1.0.2"
 c2rust-bitfields = "0.20"
-windows-sys = { version = "0.59", features = [
+windows = { version = "0.59", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
@@ -60,6 +60,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_NetworkManagement_IpHelper",
 ] }
 libloading = "0.8"
+socket2 = "0.5.10"
 
 [target.'cfg(any(target_os = "macos", target_os = "freebsd"))'.dependencies]
 route_manager = "0.1.4"
@@ -99,7 +100,7 @@ targets = [
     "aarch64-linux-android",
     "aarch64-apple-ios",
     "x86_64-apple-ios",
-    "x86_64-unknown-freebsd"
+    "x86_64-unknown-freebsd",
 ]
 
 [[example]]

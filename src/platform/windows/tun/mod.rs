@@ -2,12 +2,13 @@ use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io, ptr};
 
-use windows_sys::Win32::Foundation::{
+use windows::core::HRESULT;
+use windows::Win32::Foundation::{
     GetLastError, ERROR_BUFFER_OVERFLOW, ERROR_HANDLE_EOF, ERROR_INVALID_DATA, ERROR_NO_MORE_ITEMS,
-    WAIT_FAILED, WAIT_OBJECT_0,
+    HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
 };
-use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-use windows_sys::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
+use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
 
 use crate::platform::windows::ffi;
 use crate::platform::windows::ffi::encode_utf16;
@@ -212,6 +213,10 @@ impl TunDevice {
             Ok(tun)
         }
     }
+
+    pub fn luid(&self) -> NET_LUID_LH {
+        self.luid
+    }
     pub fn index(&self) -> u32 {
         self.index
     }
@@ -303,7 +308,7 @@ impl SessionHandle {
                 ERROR_HANDLE_EOF => Err(std::io::Error::from(io::ErrorKind::WriteZero)),
                 ERROR_BUFFER_OVERFLOW => Err(std::io::Error::from(io::ErrorKind::WouldBlock)),
                 ERROR_INVALID_DATA => Err(std::io::Error::from(io::ErrorKind::InvalidData)),
-                e => Err(io::Error::from_raw_os_error(e as i32)),
+                e => Err(io::Error::from_raw_os_error(HRESULT::from_win32(e.0).0)),
             }
         } else {
             unsafe { ptr::copy_nonoverlapping(buf.as_ptr(), bytes_ptr, buf.len()) };
@@ -324,7 +329,7 @@ impl SessionHandle {
             return match unsafe { GetLastError() } {
                 ERROR_HANDLE_EOF => Err(std::io::Error::from(io::ErrorKind::UnexpectedEof)),
                 ERROR_NO_MORE_ITEMS => Err(std::io::Error::from(io::ErrorKind::WouldBlock)),
-                e => Err(io::Error::from_raw_os_error(e as i32)),
+                e => Err(io::Error::from_raw_os_error(HRESULT::from_win32(e.0).0)),
             };
         }
         let size = size as usize;
@@ -341,14 +346,14 @@ impl SessionHandle {
         self.check_shutdown()?;
         //Wait on both the read handle and the shutdown handle so that we stop when requested
         let handles = [
-            self.read_event,
-            cancel_event.as_raw_handle(),
-            self.adapter.shutdown_event.as_raw_handle(),
+            HANDLE(self.read_event),
+            HANDLE(cancel_event.as_raw_handle()),
+            HANDLE(self.adapter.shutdown_event.as_raw_handle()),
         ];
         let result = unsafe {
             //SAFETY: We abide by the requirements of WaitForMultipleObjects, handles is a
             //pointer to valid, aligned, stack memory
-            WaitForMultipleObjects(3, &handles as _, 0, INFINITE)
+            WaitForMultipleObjects(&handles, false, INFINITE)
         };
         match result {
             WAIT_FAILED => Err(io::Error::last_os_error()),
@@ -356,7 +361,7 @@ impl SessionHandle {
                 if result == WAIT_OBJECT_0 {
                     //We have data!
                     Ok(())
-                } else if result == WAIT_OBJECT_0 + 1 {
+                } else if result.0 == WAIT_OBJECT_0.0 + 1 {
                     Err(io::Error::new(io::ErrorKind::Interrupted, "cancel"))
                 } else {
                     //Shutdown event triggered
@@ -371,11 +376,14 @@ impl SessionHandle {
     fn wait_readable(&self) -> io::Result<()> {
         self.check_shutdown()?;
         //Wait on both the read handle and the shutdown handle so that we stop when requested
-        let handles = [self.read_event, self.adapter.shutdown_event.as_raw_handle()];
+        let handles = [
+            HANDLE(self.read_event),
+            HANDLE(self.adapter.shutdown_event.as_raw_handle()),
+        ];
         let result = unsafe {
             //SAFETY: We abide by the requirements of WaitForMultipleObjects, handles is a
             //pointer to valid, aligned, stack memory
-            WaitForMultipleObjects(2, &handles as _, 0, INFINITE)
+            WaitForMultipleObjects(&handles, false, INFINITE)
         };
         match result {
             WAIT_FAILED => Err(io::Error::last_os_error()),

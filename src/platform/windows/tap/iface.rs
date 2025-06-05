@@ -3,23 +3,18 @@ use crate::platform::windows::ffi::decode_utf16;
 use scopeguard::{guard, ScopeGuard};
 use std::io;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
-use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
-use windows_sys::{
-    core::GUID,
-    Win32::{
-        Devices::DeviceAndDriverInstallation::{
-            DICD_GENERATE_ID, DICS_FLAG_GLOBAL, DIF_INSTALLDEVICE, DIF_INSTALLINTERFACES,
-            DIF_REGISTERDEVICE, DIF_REGISTER_COINSTALLERS, DIF_REMOVE, DIGCF_PRESENT, DIREG_DRV,
-            SPDIT_COMPATDRIVER, SPDRP_HARDWAREID,
-        },
-        Foundation::{GENERIC_READ, GENERIC_WRITE, TRUE},
-        NetworkManagement::Ndis::NET_LUID_LH,
-        Storage::FileSystem::{
-            FILE_ATTRIBUTE_SYSTEM, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        },
-        System::Registry::{KEY_NOTIFY, KEY_QUERY_VALUE, REG_NOTIFY_CHANGE_NAME},
-    },
+use windows::core::GUID;
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    DICD_GENERATE_ID, DICS_FLAG_GLOBAL, DIF_INSTALLDEVICE, DIF_INSTALLINTERFACES,
+    DIF_REGISTERDEVICE, DIF_REGISTER_COINSTALLERS, DIF_REMOVE, DIGCF_PRESENT, DIREG_DRV,
+    SPDIT_COMPATDRIVER, SPDRP_HARDWAREID,
 };
+use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_SYSTEM, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+};
+use windows::Win32::System::Registry::{KEY_NOTIFY, KEY_QUERY_VALUE, REG_NOTIFY_CHANGE_NAME};
 
 const GUID_NETWORK_ADAPTER: GUID = GUID {
     data1: 0x4d36e972,
@@ -58,7 +53,7 @@ pub fn create_interface(component_id: &str) -> io::Result<NET_LUID_LH> {
     )?;
 
     ffi::set_selected_device(devinfo, &devinfo_data)?;
-    ffi::set_device_registry_property(devinfo, &devinfo_data, SPDRP_HARDWAREID, component_id)?;
+    ffi::set_device_registry_property(devinfo, &mut devinfo_data, SPDRP_HARDWAREID, component_id)?;
 
     ffi::build_driver_info_list(devinfo, &mut devinfo_data, SPDIT_COMPATDRIVER)?;
 
@@ -118,24 +113,24 @@ pub fn create_interface(component_id: &str) -> io::Result<NET_LUID_LH> {
     let key = ffi::open_dev_reg_key(
         devinfo,
         &devinfo_data,
-        DICS_FLAG_GLOBAL,
+        DICS_FLAG_GLOBAL.0,
         0,
         DIREG_DRV,
-        KEY_QUERY_VALUE | KEY_NOTIFY,
+        (KEY_QUERY_VALUE | KEY_NOTIFY).0,
     )?;
 
-    let key = winreg::RegKey::predef(key as _);
+    let reg_key = winreg::RegKey::predef(key.0);
 
-    while key.get_value::<u32, &str>("*IfType").is_err() {
-        ffi::notify_change_key_value(key.raw_handle() as _, TRUE, REG_NOTIFY_CHANGE_NAME, 2000)?;
+    while reg_key.get_value::<u32, &str>("*IfType").is_err() {
+        ffi::notify_change_key_value(key, true, REG_NOTIFY_CHANGE_NAME, 2000)?;
     }
 
-    while key.get_value::<u32, &str>("NetLuidIndex").is_err() {
-        ffi::notify_change_key_value(key.raw_handle() as _, TRUE, REG_NOTIFY_CHANGE_NAME, 2000)?;
+    while reg_key.get_value::<u32, &str>("NetLuidIndex").is_err() {
+        ffi::notify_change_key_value(key, true, REG_NOTIFY_CHANGE_NAME, 2000)?;
     }
 
-    let if_type: u32 = key.get_value("*IfType")?;
-    let luid_index: u32 = key.get_value("NetLuidIndex")?;
+    let if_type: u32 = reg_key.get_value("*IfType")?;
+    let luid_index: u32 = reg_key.get_value("NetLuidIndex")?;
 
     // Defuse the uninstaller
     ScopeGuard::into_inner(uninstaller);
@@ -181,12 +176,12 @@ pub fn check_interface(component_id: &str, luid: &NET_LUID_LH) -> io::Result<()>
         let key = match ffi::open_dev_reg_key(
             devinfo,
             &devinfo_data,
-            DICS_FLAG_GLOBAL,
+            DICS_FLAG_GLOBAL.0,
             0,
             DIREG_DRV,
-            KEY_QUERY_VALUE | KEY_NOTIFY,
+            (KEY_QUERY_VALUE | KEY_NOTIFY).0,
         ) {
-            Ok(key) => winreg::RegKey::predef(key as _),
+            Ok(key) => winreg::RegKey::predef(key.0),
             Err(_) => continue,
         };
 
@@ -249,15 +244,15 @@ pub fn delete_interface(component_id: &str, luid: &NET_LUID_LH) -> io::Result<()
         let key = ffi::open_dev_reg_key(
             devinfo,
             &devinfo_data,
-            DICS_FLAG_GLOBAL,
+            DICS_FLAG_GLOBAL.0,
             0,
             DIREG_DRV,
-            KEY_QUERY_VALUE | KEY_NOTIFY,
+            (KEY_QUERY_VALUE | KEY_NOTIFY).0,
         );
         if key.is_err() {
             continue;
         }
-        let key = winreg::RegKey::predef(key? as _);
+        let key = winreg::RegKey::predef(key?.0);
 
         let if_type: u32 = match key.get_value("*IfType") {
             Ok(if_type) => if_type,
@@ -296,10 +291,10 @@ pub fn open_interface(luid: &NET_LUID_LH) -> io::Result<OwnedHandle> {
 
     let handle = ffi::create_file(
         &path,
-        GENERIC_READ | GENERIC_WRITE,
+        (GENERIC_READ | GENERIC_WRITE).0,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED,
     )?;
-    unsafe { Ok(OwnedHandle::from_raw_handle(handle)) }
+    unsafe { Ok(OwnedHandle::from_raw_handle(handle.0)) }
 }
