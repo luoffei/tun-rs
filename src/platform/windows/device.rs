@@ -10,7 +10,7 @@ use crate::platform::windows::netsh;
 use crate::platform::windows::tap::TapDevice;
 use crate::platform::windows::tun::TunDevice;
 use crate::platform::ETHER_ADDR_LEN;
-use crate::Layer;
+use crate::{Layer, ToIpv4Address, ToIpv4Netmask, ToIpv6Address, ToIpv6Netmask};
 
 pub(crate) enum Driver {
     Tun(TunDevice),
@@ -212,22 +212,42 @@ impl DeviceImpl {
         let index = self.if_index()?;
         crate::platform::windows::ffi::addresses(index)
     }
-    /// Sets the network address for the device.
+    /// Sets the IPv4 network address for the device.
     ///
     /// This method configures the IP address, netmask, and an optional destination for the interface
-    pub fn add_address(
+    /// using the `netsh` command.
+    pub fn set_network_address<IPv4: ToIpv4Address, Netmask: ToIpv4Netmask>(
         &self,
-        address: IpAddr,
-        netmask: IpAddr,
-        destination: Option<IpAddr>,
+        address: IPv4,
+        netmask: Netmask,
+        destination: Option<IPv4>,
     ) -> io::Result<()> {
-        crate::platform::windows::ffi::add_address(self.if_index()?, address, netmask, destination)
+        crate::platform::windows::ffi::add_address(
+            self.if_index()?,
+            address.ipv4()?.into(),
+            netmask.netmask()?.into(),
+            destination.map(|v| v.ipv4()).transpose()?.map(|v| v.into()),
+        )
     }
     /// Removes the specified IP address from the device.
     pub fn remove_address(&self, addr: IpAddr) -> io::Result<()> {
         crate::platform::windows::ffi::remove_address(self.if_index()?, addr)
     }
-
+    /// Adds an IPv6 address to the device.
+    ///
+    /// Configures the IPv6 address and netmask (converted from prefix) for the interface.
+    pub fn add_address_v6<IPv6: ToIpv6Address, Netmask: ToIpv6Netmask>(
+        &self,
+        address: IPv6,
+        netmask: Netmask,
+    ) -> io::Result<()> {
+        crate::platform::windows::ffi::add_address(
+            self.if_index()?,
+            address.ipv6()?.into(),
+            netmask.netmask()?.into(),
+            None,
+        )
+    }
     /// Retrieves the MTU for the device (IPv4).
     ///
     /// This method uses a Windows-specific FFI function to query the MTU by interface index.

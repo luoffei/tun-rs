@@ -391,21 +391,13 @@ impl DeviceBuilder {
             let prefix = prefix?;
             let address = address?;
             let destination = destination.transpose()?;
-            device.add_address(
-                IpAddr::V4(address),
-                IpAddr::V4(ToIpv4Netmask::netmask(&prefix)?),
-                destination.map(|ip| IpAddr::V4(ip)),
-            )?;
+            device.set_network_address(address, prefix, destination)?;
         }
         if let Some(ipv6) = self.ipv6 {
             for (address, prefix) in ipv6 {
                 let prefix = prefix?;
                 let address = address?;
-                device.add_address(
-                    IpAddr::V6(address),
-                    IpAddr::V6(ToIpv6Netmask::netmask(&prefix)?),
-                    None,
-                )?;
+                device.add_address_v6(address, prefix)?;
             }
         }
         device.enabled(self.enabled.unwrap_or(true))?;
