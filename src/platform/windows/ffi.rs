@@ -655,6 +655,10 @@ pub fn addresses(index: u32) -> io::Result<Vec<IpAddr>> {
             .map(|row| convert_sockaddr(row.Address).ip())
             .collect();
 
+    unsafe {
+        FreeMibTable(if_table as _);
+    }
+
     Ok(address_set)
 }
 
