@@ -137,11 +137,9 @@ pub fn luid_to_alias(luid: &NET_LUID_LH) -> io::Result<String> {
     winapi_result(result)?;
     Ok(decode_utf16(&alias))
 }
-#[allow(dead_code)]
 pub fn reset_event(handle: RawHandle) -> io::Result<()> {
     unsafe { ResetEvent(HANDLE(handle)).map_err(error_map) }
 }
-#[allow(dead_code)]
 pub fn wait_for_single_object(handle: RawHandle, timeout: u32) -> io::Result<()> {
     let wait_event = unsafe { WaitForSingleObject(HANDLE(handle), timeout) };
     if wait_event == WAIT_OBJECT_0 {
