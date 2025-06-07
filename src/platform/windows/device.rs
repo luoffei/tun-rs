@@ -3,14 +3,22 @@ use std::collections::HashSet;
 use std::io;
 use std::net::IpAddr;
 use std::os::windows::io::OwnedHandle;
+use windows::core::GUID;
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 
 use crate::builder::DeviceConfig;
 use crate::platform::windows::netsh;
 use crate::platform::windows::tap::TapDevice;
-use crate::platform::windows::tun::TunDevice;
+use crate::platform::windows::tun::{adapter_cleanup_orphaned_devices, TunDevice};
 use crate::platform::ETHER_ADDR_LEN;
 use crate::{Layer, ToIpv4Address, ToIpv4Netmask, ToIpv6Address, ToIpv6Netmask};
+
+pub(crate) const GUID_NETWORK_ADAPTER: GUID = GUID {
+    data1: 0x4d36e972,
+    data2: 0xe325,
+    data3: 0x11ce,
+    data4: [0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18],
+};
 
 pub(crate) enum Driver {
     Tun(TunDevice),
@@ -27,6 +35,8 @@ impl DeviceImpl {
     pub(crate) fn new(config: DeviceConfig) -> io::Result<Self> {
         let layer = config.layer.unwrap_or(Layer::L3);
         let device = if layer == Layer::L3 {
+            adapter_cleanup_orphaned_devices();
+
             let wintun_file = config.wintun_file.as_deref().unwrap_or("wintun.dll");
             let ring_capacity = config.ring_capacity.unwrap_or(0x20_0000);
             let delete_driver = config.delete_driver.unwrap_or(false);
@@ -222,7 +232,7 @@ impl DeviceImpl {
         crate::platform::windows::ffi::add_address(
             self.if_index()?,
             address.ipv4()?.into(),
-            netmask.netmask()?.into(),
+            netmask.prefix()?,
             destination.map(|v| v.ipv4()).transpose()?.map(|v| v.into()),
         )
     }
@@ -241,7 +251,7 @@ impl DeviceImpl {
         crate::platform::windows::ffi::add_address(
             self.if_index()?,
             address.ipv6()?.into(),
-            netmask.netmask()?.into(),
+            netmask.prefix()?,
             None,
         )
     }

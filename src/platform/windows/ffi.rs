@@ -2,8 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::{io, mem, ptr, slice};
 
-use socket2::SockAddr;
-use windows::core::{GUID, HRESULT, PCWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiBuildDriverInfoList, SetupDiCallClassInstaller, SetupDiClassNameFromGuidW,
     SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW, SetupDiDestroyDeviceInfoList,
@@ -15,8 +14,8 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SETUP_DI_REGISTRY_PROPERTY, SP_DEVINFO_DATA, SP_DRVINFO_DATA_V2_W, SP_DRVINFO_DETAIL_DATA_W,
 };
 use windows::Win32::Foundation::{
-    ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
-    WIN32_ERROR,
+    ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS, ERROR_OBJECT_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToAlias, ConvertInterfaceLuidToGuid,
@@ -28,7 +27,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Networking::WinSock::{
-    NlroManual, AF_INET, AF_INET6, AF_UNSPEC, MIB_IPPROTO_NETMGMT, SOCKADDR_INET,
+    NlroManual, AF_INET, AF_INET6, AF_UNSPEC, MIB_IPPROTO_NETMGMT,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES,
@@ -42,8 +41,15 @@ use windows::Win32::System::Threading::{
 use windows::Win32::System::IO::{
     CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0,
 };
+use windows::{
+    core::{GUID, HRESULT},
+    Win32::{
+        Foundation::{ERROR_SUCCESS, WIN32_ERROR},
+        Networking::WinSock::SOCKADDR_INET,
+    },
+};
 
-fn error_map(err: windows::core::Error) -> io::Error {
+pub fn error_map(err: windows::core::Error) -> io::Error {
     io::Error::from(err)
 }
 
@@ -71,20 +77,6 @@ fn convert_sockaddr(sa: SOCKADDR_INET) -> SocketAddr {
             _ => panic!("Invalid address family"),
         }
     }
-}
-
-fn inet_socksaddr_from_socketaddr(addr: SocketAddr) -> SOCKADDR_INET {
-    let mut sockaddr: SOCKADDR_INET = unsafe { mem::zeroed() };
-    match addr {
-        SocketAddr::V4(_) => unsafe {
-            sockaddr.Ipv4 = *(SockAddr::from(addr).as_ptr() as *const _)
-        },
-        SocketAddr::V6(_) => unsafe {
-            sockaddr.Ipv6 = *(SockAddr::from(addr).as_ptr() as *const _)
-        },
-    }
-
-    sockaddr
 }
 
 /// Encode a string as a utf16 buffer
@@ -665,7 +657,7 @@ pub fn addresses(index: u32) -> io::Result<Vec<IpAddr>> {
 pub fn add_address(
     index: u32,
     address: IpAddr,
-    netmask: IpAddr,
+    prefix: u8,
     gateway: Option<IpAddr>,
 ) -> io::Result<()> {
     let mut row = MIB_UNICASTIPADDRESS_ROW::default();
@@ -673,23 +665,27 @@ pub fn add_address(
 
     row.InterfaceIndex = index;
     row.Address = SocketAddr::new(address, 0).into();
-    row.OnLinkPrefixLength = ipnet::ip_mask_to_prefix(netmask).unwrap();
+    row.OnLinkPrefixLength = prefix;
 
     let result = unsafe { CreateUnicastIpAddressEntry(&row) };
-    winapi_result(result)?;
+    if result != ERROR_OBJECT_ALREADY_EXISTS {
+        winapi_result(result)?;
+    }
 
     if let Some(gateway) = gateway {
         let mut row = MIB_IPFORWARD_ROW2::default();
         unsafe { InitializeIpForwardEntry(&mut row as _) };
 
         row.InterfaceIndex = index;
-        row.NextHop = inet_socksaddr_from_socketaddr(SocketAddr::new(gateway, 0));
+        row.NextHop = SocketAddr::new(gateway, 0).into();
         row.Metric = 0;
         row.Protocol = MIB_IPPROTO_NETMGMT;
         row.Origin = NlroManual;
 
         let result = unsafe { CreateIpForwardEntry2(&row) };
-        winapi_result(result)?;
+        if result != ERROR_OBJECT_ALREADY_EXISTS {
+            winapi_result(result)?;
+        }
     }
 
     Ok(())

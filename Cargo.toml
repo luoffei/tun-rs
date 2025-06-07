@@ -58,9 +58,10 @@ windows = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_NetworkManagement_IpHelper",
+    "Win32_Devices_Properties",
+    "Win32_System_SystemInformation",
 ] }
 libloading = "0.8"
-socket2 = "0.5.10"
 
 [target.'cfg(any(target_os = "macos", target_os = "freebsd"))'.dependencies]
 route_manager = "0.1.4"

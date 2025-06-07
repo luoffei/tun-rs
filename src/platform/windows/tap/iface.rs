@@ -1,9 +1,9 @@
 use crate::platform::windows::ffi;
 use crate::platform::windows::ffi::decode_utf16;
+use crate::windows::device::GUID_NETWORK_ADAPTER;
 use scopeguard::{guard, ScopeGuard};
 use std::io;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
-use windows::core::GUID;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     DICD_GENERATE_ID, DICS_FLAG_GLOBAL, DIF_INSTALLDEVICE, DIF_INSTALLINTERFACES,
     DIF_REGISTERDEVICE, DIF_REGISTER_COINSTALLERS, DIF_REMOVE, DIGCF_PRESENT, DIREG_DRV,
@@ -15,13 +15,6 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_SYSTEM, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Registry::{KEY_NOTIFY, KEY_QUERY_VALUE, REG_NOTIFY_CHANGE_NAME};
-
-const GUID_NETWORK_ADAPTER: GUID = GUID {
-    data1: 0x4d36e972,
-    data2: 0xe325,
-    data3: 0x11ce,
-    data4: [0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18],
-};
 
 #[repr(C, align(1))]
 #[derive(c2rust_bitfields::BitfieldStruct)]
