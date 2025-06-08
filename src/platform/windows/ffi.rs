@@ -401,6 +401,7 @@ pub fn get_device_registry_property(
     property: SETUP_DI_REGISTRY_PROPERTY,
 ) -> io::Result<String> {
     let mut value = vec![0; 32];
+    let mut size = 0;
 
     unsafe {
         SetupDiGetDeviceRegistryPropertyW(
@@ -409,12 +410,12 @@ pub fn get_device_registry_property(
             property,
             None,
             Some(&mut value),
-            None,
+            Some(&mut size),
         )
     }
     .map_err(error_map)?;
 
-    Ok(String::from_utf8_lossy(&value).to_string())
+    Ok(decode_utf8(&value[..size as _]))
 }
 
 pub fn build_driver_info_list(
