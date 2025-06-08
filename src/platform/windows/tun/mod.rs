@@ -19,7 +19,7 @@ mod adapter_win7;
 mod wintun_log;
 mod wintun_raw;
 
-pub use adapter::adapter_cleanup_orphaned_devices;
+pub use adapter::check_adapter_if_orphaned_devices;
 
 /// The maximum size of wintun's internal ring buffer (in bytes)
 pub const MAX_RING_CAPACITY: u32 = 0x400_0000;

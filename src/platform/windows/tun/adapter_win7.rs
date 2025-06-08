@@ -17,7 +17,7 @@ use windows::{
 use crate::windows::{
     device::GUID_NETWORK_ADAPTER,
     ffi::{destroy_device_info_list, encode_utf16, enum_device_info},
-    tun::adapter::{adapter_remove_instance, get_device_name, DEVPKEY_Wintun_OwningProcess},
+    tun::adapter::{get_device_name, DEVPKEY_Wintun_OwningProcess},
 };
 
 #[repr(C)]
@@ -27,7 +27,7 @@ pub struct OwningProcess {
     creation_time: FILETIME,
 }
 
-pub fn adapter_cleanup_orphaned_devices_win7() {
+pub fn check_adapter_if_orphaned_devices_win7(adapter_name: &str) -> bool {
     let device_name = encode_utf16("ROOT\\Wintun");
     let dev_info = match unsafe {
         SetupDiGetClassDevsExW(
@@ -45,12 +45,12 @@ pub fn adapter_cleanup_orphaned_devices_win7() {
             if err.code() == ERROR_INVALID_DATA.to_hresult() {
                 log::error!("Failed to get adapters");
             }
-            return;
+            return false;
         }
     };
 
     let mut index = 0;
-    loop {
+    let is_orphaned_adapter = loop {
         match enum_device_info(dev_info, index) {
             Some(ret) => {
                 let Ok(devinfo_data) = ret else {
@@ -82,21 +82,22 @@ pub fn adapter_cleanup_orphaned_devices_win7() {
                     }
                 }
 
-                let ret = get_device_name(dev_info, &devinfo_data);
-                let name = ret.as_deref().unwrap_or("<unknown>");
-                if adapter_remove_instance(dev_info, &devinfo_data).is_err() {
-                    log::error!("Failed to remove orphaned adapter \"{}\"", name);
+                let Ok(name) = get_device_name(dev_info, &devinfo_data) else {
+                    index += 1;
                     continue;
-                }
+                };
 
-                log::info!("Removed orphaned adapter \"{}\"", name);
+                if adapter_name == &name {
+                    break true;
+                }
             }
-            None => break,
+            None => break false,
         }
 
         index += 1;
-    }
+    };
     _ = destroy_device_info_list(dev_info);
+    is_orphaned_adapter
 }
 
 fn process_is_stale(owning_process: &OwningProcess) -> bool {

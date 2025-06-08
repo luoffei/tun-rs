@@ -20,7 +20,7 @@ use windows::{
 
 use crate::windows::{
     device::GUID_NETWORK_ADAPTER,
-    ffi::{destroy_device_info_list, encode_utf16, enum_device_info, error_map},
+    ffi::{decode_utf8, destroy_device_info_list, encode_utf16, enum_device_info, error_map},
     tun::MAX_POOL,
 };
 
@@ -46,10 +46,9 @@ pub const DEVPKEY_Wintun_OwningProcess: DEVPROPKEY = DEVPROPKEY {
     pid: DEVPROPID_FIRST_USABLE + 3,
 };
 
-pub fn adapter_cleanup_orphaned_devices() {
+pub fn check_adapter_if_orphaned_devices(adapter_name: &str) -> bool {
     if is_windows_seven() {
-        super::adapter_win7::adapter_cleanup_orphaned_devices_win7();
-        return;
+        return super::adapter_win7::check_adapter_if_orphaned_devices_win7(adapter_name);
     }
 
     let device_name = encode_utf16("SWD\\Wintun");
@@ -65,11 +64,11 @@ pub fn adapter_cleanup_orphaned_devices() {
         )
     }) else {
         log::error!("Failed to get adapters");
-        return;
+        return false;
     };
 
     let mut index = 0;
-    loop {
+    let is_orphaned_adapter = loop {
         match enum_device_info(dev_info, index) {
             Some(ret) => {
                 let Ok(devinfo_data) = ret else {
@@ -85,29 +84,30 @@ pub fn adapter_cleanup_orphaned_devices() {
                     continue;
                 }
 
-                let ret = get_device_name(dev_info, &devinfo_data);
-                let name = ret.as_deref().unwrap_or("<unknown>");
-                if adapter_remove_instance(dev_info, &devinfo_data).is_err() {
-                    log::error!("Failed to remove orphaned adapter \"{}\"", name);
+                let Ok(name) = get_device_name(dev_info, &devinfo_data) else {
+                    index += 1;
                     continue;
-                }
+                };
 
-                log::info!("Removed orphaned adapter \"{}\"", name);
+                if adapter_name == name {
+                    break true;
+                }
             }
-            None => break,
+            None => break false,
         }
 
         index += 1;
-    }
+    };
 
     _ = destroy_device_info_list(dev_info);
+    is_orphaned_adapter
 }
 
 pub fn get_device_name(devinfo: HDEVINFO, devinfo_data: &SP_DEVINFO_DATA) -> io::Result<String> {
     unsafe {
         let mut ptype = mem::zeroed();
         let mut buf: [u8; MAX_POOL] = mem::zeroed();
-        let mut size = mem::zeroed();
+        let mut size = 0;
 
         SetupDiGetDevicePropertyW(
             devinfo,
@@ -120,10 +120,11 @@ pub fn get_device_name(devinfo: HDEVINFO, devinfo_data: &SP_DEVINFO_DATA) -> io:
         )
         .map_err(error_map)?;
 
-        Ok(String::from_utf8_lossy(&buf[..size as _]).to_string())
+        Ok(decode_utf8(&buf[..size as _]))
     }
 }
 
+#[allow(dead_code)]
 pub fn adapter_remove_instance(
     devinfo: HDEVINFO,
     devinfo_data: &SP_DEVINFO_DATA,

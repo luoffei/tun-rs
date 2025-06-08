@@ -90,6 +90,16 @@ pub fn decode_utf16(string: &[u16]) -> String {
     String::from_utf16_lossy(&string[..end])
 }
 
+pub fn decode_utf8(buf: &[u8]) -> String {
+    let wchar_count = (buf.len() / 2) as usize;
+    let real_chars = wchar_count.saturating_sub(1);
+
+    let wide_slice: &[u16] =
+        unsafe { slice::from_raw_parts(buf.as_ptr().cast::<u16>(), real_chars) };
+
+    String::from_utf16_lossy(wide_slice)
+}
+
 pub fn string_from_guid(guid: &GUID) -> io::Result<String> {
     let mut string = vec![0; 39];
 
