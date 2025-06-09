@@ -13,7 +13,7 @@ use windows::{
             },
             Properties::DEVPROPID_FIRST_USABLE,
         },
-        Foundation::DEVPROPKEY,
+        Foundation::{DEVPROPKEY, ERROR_INSUFFICIENT_BUFFER},
         System::SystemInformation::{GetVersionExA, OSVERSIONINFOA},
     },
 };
@@ -21,7 +21,6 @@ use windows::{
 use crate::windows::{
     device::GUID_NETWORK_ADAPTER,
     ffi::{decode_utf8, destroy_device_info_list, encode_utf16, enum_device_info, error_map},
-    tun::MAX_POOL,
 };
 
 #[allow(non_upper_case_globals)]
@@ -104,24 +103,43 @@ pub fn check_adapter_if_orphaned_devices(adapter_name: &str) -> bool {
 }
 
 pub fn get_device_name(devinfo: HDEVINFO, devinfo_data: &SP_DEVINFO_DATA) -> io::Result<String> {
-    unsafe {
-        let mut ptype = mem::zeroed();
-        let mut buf: [u8; MAX_POOL] = mem::zeroed();
-        let mut size = 0;
-
+    let mut prop_type = unsafe { mem::zeroed() };
+    let mut required_size: u32 = 0;
+    match unsafe {
         SetupDiGetDevicePropertyW(
             devinfo,
             devinfo_data,
             &DEVPKEY_Wintun_Name,
-            &mut ptype,
-            Some(&mut buf),
-            Some(&mut size),
+            &mut prop_type,
+            None,
+            Some(&mut required_size),
             0,
         )
-        .map_err(error_map)?;
-
-        Ok(decode_utf8(&buf[..size as _]))
+    } {
+        Ok(_) => (),
+        Err(err) => {
+            if err.code() != ERROR_INSUFFICIENT_BUFFER.to_hresult() {
+                return Err(error_map(err));
+            }
+        }
     }
+
+    let mut buf: Vec<u8> = vec![0; required_size as usize];
+
+    unsafe {
+        SetupDiGetDevicePropertyW(
+            devinfo,
+            devinfo_data,
+            &DEVPKEY_Wintun_Name,
+            &mut prop_type,
+            Some(buf.as_mut_slice()),
+            Some(&mut required_size),
+            0,
+        )
+    }
+    .map_err(error_map)?;
+
+    Ok(decode_utf8(&buf))
 }
 
 #[allow(dead_code)]
