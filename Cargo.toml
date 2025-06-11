@@ -60,6 +60,7 @@ windows = { version = "0.59", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_Devices_Properties",
     "Win32_System_SystemInformation",
+    "Win32_NetworkManagement_WindowsFirewall",
 ] }
 libloading = "0.8"
 
@@ -83,6 +84,7 @@ async-std = { version = "1", features = ["attributes", "unstable"] }
 async-ctrlc = "1.2.0"
 
 [features]
+defalt = ["async"]
 async = ["async_tokio"]
 async_std = ["async_io"]
 async_tokio = ["blocking", "tokio"]

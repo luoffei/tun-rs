@@ -1,23 +1,17 @@
 use std::mem;
 
-use windows::{
-    core::PCWSTR,
-    Win32::{
-        Devices::{
-            DeviceAndDriverInstallation::{
-                SetupDiGetClassDevsExW, SetupDiGetDevicePropertyW, SETUP_DI_GET_CLASS_DEVS_FLAGS,
-            },
-            Properties::DEVPROP_TYPE_BINARY,
-        },
-        Foundation::{CloseHandle, ERROR_INVALID_DATA, FILETIME},
-        System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+use scopeguard::defer;
+use windows::Win32::{
+    Devices::{
+        DeviceAndDriverInstallation::{SetupDiGetDevicePropertyW, SETUP_DI_GET_CLASS_DEVS_FLAGS},
+        Properties::DEVPROP_TYPE_BINARY,
     },
+    Foundation::{CloseHandle, ERROR_INVALID_DATA, FILETIME},
+    System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
 };
 
 use crate::windows::{
-    device::GUID_NETWORK_ADAPTER,
-    ffi::{destroy_device_info_list, encode_utf16, enum_device_info},
-    tun::adapter::{get_device_name, DEVPKEY_Wintun_OwningProcess},
+    device::GUID_NETWORK_ADAPTER, ffi, tun::adapter::DEVPKEY_Wintun_OwningProcess,
 };
 
 #[repr(C)]
@@ -28,30 +22,27 @@ pub struct OwningProcess {
 }
 
 pub fn check_adapter_if_orphaned_devices_win7(adapter_name: &str) -> bool {
-    let device_name = encode_utf16("ROOT\\Wintun");
-    let dev_info = match unsafe {
-        SetupDiGetClassDevsExW(
-            Some(&GUID_NETWORK_ADAPTER),
-            PCWSTR::from_raw(device_name.as_ptr()),
-            None,
-            SETUP_DI_GET_CLASS_DEVS_FLAGS(0),
-            None,
-            None,
-            None,
-        )
-    } {
+    let dev_info = match ffi::get_class_devs(
+        &GUID_NETWORK_ADAPTER,
+        Some("ROOT\\Wintun"),
+        SETUP_DI_GET_CLASS_DEVS_FLAGS(0),
+    ) {
         Ok(dev_info) => dev_info,
         Err(err) => {
-            if err.code() == ERROR_INVALID_DATA.to_hresult() {
+            if err.raw_os_error() == Some(ERROR_INVALID_DATA.to_hresult().0) {
                 log::error!("Failed to get adapters");
             }
             return false;
         }
     };
 
+    defer! {
+        _ = ffi::destroy_device_info_list(dev_info);
+    }
+
     let mut index = 0;
     let is_orphaned_adapter = loop {
-        match enum_device_info(dev_info, index) {
+        match ffi::enum_device_info(dev_info, index) {
             Some(ret) => {
                 let Ok(devinfo_data) = ret else {
                     continue;
@@ -82,7 +73,7 @@ pub fn check_adapter_if_orphaned_devices_win7(adapter_name: &str) -> bool {
                     }
                 }
 
-                let Ok(name) = get_device_name(dev_info, &devinfo_data) else {
+                let Ok(name) = ffi::get_device_name(dev_info, &devinfo_data) else {
                     index += 1;
                     continue;
                 };
@@ -96,7 +87,6 @@ pub fn check_adapter_if_orphaned_devices_win7(adapter_name: &str) -> bool {
 
         index += 1;
     };
-    _ = destroy_device_info_list(dev_info);
     is_orphaned_adapter
 }
 

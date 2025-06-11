@@ -7,7 +7,6 @@ use windows::core::GUID;
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 
 use crate::builder::DeviceConfig;
-use crate::platform::windows::netsh;
 use crate::platform::windows::tap::TapDevice;
 use crate::platform::windows::tun::TunDevice;
 use crate::platform::ETHER_ADDR_LEN;
@@ -186,12 +185,14 @@ impl DeviceImpl {
     ///
     /// This method first checks if the current name is different from the desired one. If it is,
     /// it uses the `netsh` command to update the interface name.
-    pub fn set_name(&self, value: &str) -> io::Result<()> {
-        let name = self.name()?;
-        if value == name {
+    pub fn set_name(&self, name: &str) -> io::Result<()> {
+        let old_name = self.name()?;
+        if name == old_name {
             return Ok(());
         }
-        netsh::set_interface_name(&name, value)
+
+        let luid = self.if_luid().unwrap();
+        super::ffi::set_interface_name(luid, name)
     }
     /// Retrieves the interface luid of the device.
     ///
@@ -226,7 +227,7 @@ impl DeviceImpl {
     /// Filters the adapter addresses by matching the device's interface index.
     pub fn addresses(&self) -> io::Result<Vec<IpAddr>> {
         let index = self.if_index()?;
-        crate::platform::windows::ffi::addresses(index)
+        super::ffi::addresses(index)
     }
     /// Sets the IPv4 network address for the device.
     ///
@@ -238,7 +239,7 @@ impl DeviceImpl {
         netmask: Netmask,
         destination: Option<IPv4>,
     ) -> io::Result<()> {
-        crate::platform::windows::ffi::add_address(
+        super::ffi::add_address(
             self.if_index()?,
             address.ipv4()?.into(),
             netmask.prefix()?,
@@ -247,7 +248,7 @@ impl DeviceImpl {
     }
     /// Removes the specified IP address from the device.
     pub fn remove_address(&self, addr: IpAddr) -> io::Result<()> {
-        crate::platform::windows::ffi::remove_address(self.if_index()?, addr)
+        super::ffi::remove_address(self.if_index()?, addr)
     }
     /// Adds an IPv6 address to the device.
     ///
@@ -257,7 +258,7 @@ impl DeviceImpl {
         address: IPv6,
         netmask: Netmask,
     ) -> io::Result<()> {
-        crate::platform::windows::ffi::add_address(
+        super::ffi::add_address(
             self.if_index()?,
             address.ipv6()?.into(),
             netmask.prefix()?,
@@ -269,7 +270,7 @@ impl DeviceImpl {
     /// This method uses a Windows-specific FFI function to query the MTU by interface index.
     pub fn mtu(&self) -> io::Result<u16> {
         let index = self.if_index()?;
-        let mtu = crate::platform::windows::ffi::get_mtu_by_index(index, true)?;
+        let mtu = super::ffi::get_mtu_by_index(index, true)?;
         Ok(mtu as _)
     }
     /// Retrieves the MTU for the device (IPv6).
@@ -277,16 +278,16 @@ impl DeviceImpl {
     /// This method uses a Windows-specific FFI function to query the IPv6 MTU by interface index.
     pub fn mtu_v6(&self) -> io::Result<u16> {
         let index = self.if_index()?;
-        let mtu = crate::platform::windows::ffi::get_mtu_by_index(index, false)?;
+        let mtu = super::ffi::get_mtu_by_index(index, false)?;
         Ok(mtu as _)
     }
     /// Sets the MTU for the device (IPv4).
     pub fn set_mtu(&self, mtu: u16) -> io::Result<()> {
-        crate::platform::windows::ffi::set_interface_mtu(self.if_luid()?, mtu as _, true)
+        super::ffi::set_interface_mtu(self.if_luid()?, mtu as _, true)
     }
     /// Sets the MTU for the device (IPv6).
     pub fn set_mtu_v6(&self, mtu: u16) -> io::Result<()> {
-        crate::platform::windows::ffi::set_interface_mtu(self.if_luid()?, mtu as _, false)
+        super::ffi::set_interface_mtu(self.if_luid()?, mtu as _, false)
     }
     /// Sets the MAC address for the device.
     ///
@@ -309,7 +310,7 @@ impl DeviceImpl {
     }
     /// Sets the interface metric (routing cost).
     pub fn set_metric(&self, metric: u16) -> io::Result<()> {
-        crate::platform::windows::ffi::set_interface_metric(self.if_index()?, metric as u32)
+        super::ffi::set_interface_metric(self.if_index()?, metric as u32)
     }
     /// Retrieves the version of the underlying driver.
     ///

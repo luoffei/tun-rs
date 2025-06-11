@@ -1,4 +1,4 @@
-use crate::platform::windows::{ffi, netsh};
+use crate::platform::windows::ffi;
 use bytes::BytesMut;
 use std::ops::DerefMut;
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
@@ -178,9 +178,8 @@ impl TapDevice {
     }
 
     /// Set the name of the interface
-    pub fn set_name(&self, newname: &str) -> io::Result<()> {
-        let name = self.get_name()?;
-        netsh::set_interface_name(&name, newname)
+    pub fn set_name(&self, name: &str) -> io::Result<()> {
+        super::ffi::set_interface_name(self.luid(), name)
     }
 
     // /// Set the ip of the interface

@@ -1,7 +1,6 @@
 use crate::platform::windows::ffi;
-use crate::platform::windows::ffi::decode_utf16;
 use crate::windows::device::GUID_NETWORK_ADAPTER;
-use scopeguard::{guard, ScopeGuard};
+use scopeguard::{defer, guard, ScopeGuard};
 use std::io;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -31,9 +30,9 @@ struct _NET_LUID_LH {
 pub fn create_interface(component_id: &str) -> io::Result<NET_LUID_LH> {
     let devinfo = ffi::create_device_info_list(&GUID_NETWORK_ADAPTER)?;
 
-    let _guard = guard((), |_| {
+    defer! {
         let _ = ffi::destroy_device_info_list(devinfo);
-    });
+    }
 
     let class_name = ffi::class_name_from_guid(&GUID_NETWORK_ADAPTER)?;
 
@@ -46,13 +45,13 @@ pub fn create_interface(component_id: &str) -> io::Result<NET_LUID_LH> {
     )?;
 
     ffi::set_selected_device(devinfo, &devinfo_data)?;
-    ffi::set_device_registry_property(devinfo, &mut devinfo_data, SPDRP_HARDWAREID, component_id)?;
+    ffi::set_device_registry_property(devinfo, &devinfo_data, SPDRP_HARDWAREID, component_id)?;
 
     ffi::build_driver_info_list(devinfo, &mut devinfo_data, SPDIT_COMPATDRIVER)?;
 
-    let _guard = guard((), |_| {
+    defer! {
         let _ = ffi::destroy_driver_info_list(devinfo, &devinfo_data, SPDIT_COMPATDRIVER);
-    });
+    }
 
     let mut driver_version = 0;
     let mut member_index = 0;
@@ -70,13 +69,11 @@ pub fn create_interface(component_id: &str) -> io::Result<NET_LUID_LH> {
             continue;
         }
 
-        let drvinfo_detail =
-            match ffi::get_driver_info_detail(devinfo, &devinfo_data, &drvinfo_data) {
-                Ok(drvinfo_detail) => drvinfo_detail,
-                _ => continue,
-            };
+        let hardware_id = match ffi::get_driver_hardware_id(devinfo, &devinfo_data, &drvinfo_data) {
+            Ok(hardware_id) => hardware_id,
+            _ => continue,
+        };
 
-        let hardware_id = decode_utf16(&drvinfo_detail.HardwareID);
         if !hardware_id.eq_ignore_ascii_case(component_id) {
             continue;
         }
@@ -141,7 +138,7 @@ pub fn create_interface(component_id: &str) -> io::Result<NET_LUID_LH> {
 
 /// Check if the given interface exists and is a valid network device
 pub fn check_interface(component_id: &str, luid: &NET_LUID_LH) -> io::Result<()> {
-    let devinfo = ffi::get_class_devs(&GUID_NETWORK_ADAPTER, DIGCF_PRESENT)?;
+    let devinfo = ffi::get_class_devs(&GUID_NETWORK_ADAPTER, None, DIGCF_PRESENT)?;
 
     let _guard = guard((), |_| {
         let _ = ffi::destroy_device_info_list(devinfo);
@@ -209,7 +206,7 @@ pub fn check_interface(component_id: &str, luid: &NET_LUID_LH) -> io::Result<()>
 
 /// Deletes an existing interface
 pub fn delete_interface(component_id: &str, luid: &NET_LUID_LH) -> io::Result<()> {
-    let devinfo = ffi::get_class_devs(&GUID_NETWORK_ADAPTER, DIGCF_PRESENT)?;
+    let devinfo = ffi::get_class_devs(&GUID_NETWORK_ADAPTER, None, DIGCF_PRESENT)?;
 
     let _guard = guard((), |_| {
         let _ = ffi::destroy_device_info_list(devinfo);

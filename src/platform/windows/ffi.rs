@@ -2,20 +2,23 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::{io, mem, ptr, slice};
 
+use scopeguard::defer;
 use windows::core::PCWSTR;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiBuildDriverInfoList, SetupDiCallClassInstaller, SetupDiClassNameFromGuidW,
     SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW, SetupDiDestroyDeviceInfoList,
     SetupDiDestroyDriverInfoList, SetupDiEnumDeviceInfo, SetupDiEnumDriverInfoW,
-    SetupDiGetClassDevsW, SetupDiGetDeviceRegistryPropertyW, SetupDiGetDriverInfoDetailW,
-    SetupDiOpenDevRegKey, SetupDiSetDeviceRegistryPropertyW, SetupDiSetSelectedDevice,
-    SetupDiSetSelectedDriverW, DI_FUNCTION, HDEVINFO, MAX_CLASS_NAME_LEN,
-    SETUP_DI_DEVICE_CREATION_FLAGS, SETUP_DI_DRIVER_TYPE, SETUP_DI_GET_CLASS_DEVS_FLAGS,
-    SETUP_DI_REGISTRY_PROPERTY, SP_DEVINFO_DATA, SP_DRVINFO_DATA_V2_W, SP_DRVINFO_DETAIL_DATA_W,
+    SetupDiGetClassDevsW, SetupDiGetDevicePropertyW, SetupDiGetDeviceRegistryPropertyW,
+    SetupDiGetDriverInfoDetailW, SetupDiOpenDevRegKey, SetupDiSetClassInstallParamsW,
+    SetupDiSetDeviceRegistryPropertyW, SetupDiSetSelectedDevice, SetupDiSetSelectedDriverW,
+    DI_FUNCTION, HDEVINFO, MAX_CLASS_NAME_LEN, SETUP_DI_DEVICE_CREATION_FLAGS,
+    SETUP_DI_DRIVER_TYPE, SETUP_DI_GET_CLASS_DEVS_FLAGS, SETUP_DI_REGISTRY_PROPERTY,
+    SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA, SP_DRVINFO_DATA_V2_W, SP_DRVINFO_DETAIL_DATA_W,
 };
+use windows::Win32::Devices::Properties::DEVPROPID_FIRST_USABLE;
 use windows::Win32::Foundation::{
-    ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS, ERROR_OBJECT_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    DEVPROPKEY, ERROR_INSUFFICIENT_BUFFER, ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS,
+    ERROR_OBJECT_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToAlias, ConvertInterfaceLuidToGuid,
@@ -26,6 +29,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
     MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows::Win32::NetworkManagement::WindowsFirewall::{INetConnectionManager, NCME_DEFAULT};
 use windows::Win32::Networking::WinSock::{
     NlroManual, AF_INET, AF_INET6, AF_UNSPEC, MIB_IPPROTO_NETMGMT,
 };
@@ -33,7 +37,11 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES,
     FILE_SHARE_MODE,
 };
-use windows::Win32::System::Com::StringFromGUID2;
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoInitializeSecurity, CoUninitialize, StringFromGUID2,
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+    RPC_C_IMP_LEVEL_IMPERSONATE,
+};
 use windows::Win32::System::Registry::{RegNotifyChangeKeyValue, HKEY, REG_NOTIFY_FILTER};
 use windows::Win32::System::Threading::{
     CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
@@ -47,6 +55,17 @@ use windows::{
         Foundation::{ERROR_SUCCESS, WIN32_ERROR},
         Networking::WinSock::SOCKADDR_INET,
     },
+};
+
+#[allow(non_upper_case_globals)]
+pub const DEVPKEY_Wintun_Name: DEVPROPKEY = DEVPROPKEY {
+    fmtid: GUID {
+        data1: 0x3361c968,
+        data2: 0x2f2e,
+        data3: 0x4660,
+        data4: [0xb4, 0x7e, 0x69, 0x9c, 0xdc, 0x4c, 0x32, 0xb9],
+    },
+    pid: DEVPROPID_FIRST_USABLE + 1,
 };
 
 pub fn error_map(err: windows::core::Error) -> io::Error {
@@ -335,8 +354,22 @@ pub fn create_device_info_list(guid: &GUID) -> io::Result<HDEVINFO> {
     unsafe { SetupDiCreateDeviceInfoList(Some(guid), None) }.map_err(error_map)
 }
 
-pub fn get_class_devs(guid: &GUID, flags: SETUP_DI_GET_CLASS_DEVS_FLAGS) -> io::Result<HDEVINFO> {
-    unsafe { SetupDiGetClassDevsW(Some(guid), None, None, flags) }.map_err(error_map)
+pub fn get_class_devs(
+    guid: &GUID,
+    enumerator: Option<&str>,
+    flags: SETUP_DI_GET_CLASS_DEVS_FLAGS,
+) -> io::Result<HDEVINFO> {
+    let enumerator =
+        enumerator.map(|enumerator| PCWSTR::from_raw(encode_utf16(enumerator).as_ptr()));
+    unsafe {
+        SetupDiGetClassDevsW(
+            Some(guid),
+            enumerator.unwrap_or(PCWSTR::null()),
+            None,
+            flags,
+        )
+    }
+    .map_err(error_map)
 }
 
 pub fn destroy_device_info_list(devinfo: HDEVINFO) -> io::Result<()> {
@@ -345,8 +378,10 @@ pub fn destroy_device_info_list(devinfo: HDEVINFO) -> io::Result<()> {
 
 pub fn class_name_from_guid(guid: &GUID) -> io::Result<String> {
     let mut class_name = vec![0; MAX_CLASS_NAME_LEN as usize];
-    unsafe { SetupDiClassNameFromGuidW(guid, &mut class_name, None) }.map_err(error_map)?;
-    Ok(decode_utf16(&class_name))
+    let mut required_size = 0;
+    unsafe { SetupDiClassNameFromGuidW(guid, &mut class_name, Some(&mut required_size)) }
+        .map_err(error_map)?;
+    Ok(decode_utf16(&class_name[..required_size as _]))
 }
 
 pub fn create_device_info(
@@ -381,12 +416,20 @@ pub fn set_selected_device(devinfo: HDEVINFO, devinfo_data: &SP_DEVINFO_DATA) ->
 
 pub fn set_device_registry_property(
     devinfo: HDEVINFO,
-    devinfo_data: &mut SP_DEVINFO_DATA,
+    devinfo_data: &SP_DEVINFO_DATA,
     property: SETUP_DI_REGISTRY_PROPERTY,
     value: &str,
 ) -> io::Result<()> {
+    let wide = encode_utf16(value);
+    let buf = unsafe { slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+
     unsafe {
-        SetupDiSetDeviceRegistryPropertyW(devinfo, devinfo_data, property, Some(value.as_bytes()))
+        SetupDiSetDeviceRegistryPropertyW(
+            devinfo,
+            devinfo_data as *const _ as _,
+            property,
+            Some(buf),
+        )
     }
     .map_err(error_map)
 }
@@ -432,27 +475,44 @@ pub fn destroy_driver_info_list(
         .map_err(error_map)
 }
 
-pub fn get_driver_info_detail(
+pub fn get_driver_hardware_id(
     devinfo: HDEVINFO,
     devinfo_data: &SP_DEVINFO_DATA,
     drvinfo_data: &SP_DRVINFO_DATA_V2_W,
-) -> io::Result<SP_DRVINFO_DETAIL_DATA_W> {
-    let mut drvinfo_detail: SP_DRVINFO_DETAIL_DATA_W = unsafe { mem::zeroed() };
-    drvinfo_detail.cbSize = mem::size_of::<SP_DRVINFO_DETAIL_DATA_W>() as _;
-
+) -> io::Result<String> {
     unsafe {
+        let mut required_size = 0;
+        let _ = SetupDiGetDriverInfoDetailW(
+            devinfo,
+            Some(devinfo_data),
+            drvinfo_data,
+            None,
+            0,
+            Some(&mut required_size),
+        );
+
+        let mut raw: Vec<u8> = vec![0; required_size as usize];
+        let p = raw.as_mut_ptr() as *mut SP_DRVINFO_DETAIL_DATA_W;
+        (*p).cbSize = mem::size_of::<SP_DRVINFO_DETAIL_DATA_W>() as _;
+
         SetupDiGetDriverInfoDetailW(
             devinfo,
             Some(devinfo_data),
             drvinfo_data,
-            Some(&mut drvinfo_detail as _),
-            drvinfo_detail.cbSize,
+            Some(&mut *p),
+            required_size,
             None,
         )
-    }
-    .map_err(error_map)?;
+        .map_err(error_map)?;
 
-    Ok(drvinfo_detail)
+        let hw_off = mem::offset_of!(SP_DRVINFO_DETAIL_DATA_W, HardwareID);
+        let wide_ptr = raw.as_ptr().add(hw_off) as *const u16;
+
+        let wide_len = (required_size as usize - hw_off) / 2;
+        let wide_slice = slice::from_raw_parts(wide_ptr, wide_len);
+
+        Ok(decode_utf16(wide_slice))
+    }
 }
 
 pub fn set_selected_driver(
@@ -468,6 +528,18 @@ pub fn set_selected_driver(
         )
     }
     .map_err(error_map)
+}
+
+pub fn call_class_install_params(
+    devinfo: HDEVINFO,
+    devinfo_data: &SP_DEVINFO_DATA,
+    header: &SP_CLASSINSTALL_HEADER,
+    params_size: u32,
+) -> io::Result<()> {
+    unsafe {
+        SetupDiSetClassInstallParamsW(devinfo, Some(devinfo_data), Some(header), params_size)
+            .map_err(error_map)
+    }
 }
 
 pub fn call_class_installer(
@@ -559,6 +631,46 @@ pub fn enum_device_info(
     }
 }
 
+pub fn get_device_name(devinfo: HDEVINFO, devinfo_data: &SP_DEVINFO_DATA) -> io::Result<String> {
+    let mut prop_type = unsafe { mem::zeroed() };
+    let mut required_size: u32 = 0;
+    match unsafe {
+        SetupDiGetDevicePropertyW(
+            devinfo,
+            devinfo_data,
+            &DEVPKEY_Wintun_Name,
+            &mut prop_type,
+            None,
+            Some(&mut required_size),
+            0,
+        )
+    } {
+        Ok(_) => (),
+        Err(err) => {
+            if err.code() != ERROR_INSUFFICIENT_BUFFER.to_hresult() {
+                return Err(error_map(err));
+            }
+        }
+    }
+
+    let mut buf: Vec<u8> = vec![0; required_size as usize];
+
+    unsafe {
+        SetupDiGetDevicePropertyW(
+            devinfo,
+            devinfo_data,
+            &DEVPKEY_Wintun_Name,
+            &mut prop_type,
+            Some(buf.as_mut_slice()),
+            Some(&mut required_size),
+            0,
+        )
+    }
+    .map_err(error_map)?;
+
+    Ok(decode_utf8(&buf))
+}
+
 pub fn device_io_control(
     handle: HANDLE,
     io_control_code: u32,
@@ -605,6 +717,55 @@ pub fn get_mtu_by_index(index: u32, is_v4: bool) -> io::Result<u32> {
     } else {
         Err(io::Error::from(io::ErrorKind::NotFound))
     }
+}
+
+pub fn set_interface_name(luid: NET_LUID_LH, name: &str) -> io::Result<()> {
+    let guid = luid_to_guid(&luid)?;
+
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+
+        CoInitializeSecurity(
+            None,
+            -1,
+            None,
+            None,
+            RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            None,
+            EOAC_NONE,
+            None,
+        )
+        .map_err(error_map)?;
+
+        defer! {
+            CoUninitialize();
+        };
+
+        const CLSID_CONNECTION_MANAGER: GUID =
+            GUID::from_u128(0xba126ad1_2166_11d1_b1d0_00805fc1270e);
+        let manager: INetConnectionManager =
+            CoCreateInstance(&CLSID_CONNECTION_MANAGER, None, CLSCTX_ALL).map_err(error_map)?;
+
+        let enum_conn = manager.EnumConnections(NCME_DEFAULT).map_err(error_map)?;
+
+        let mut fetched_count: u32 = 0;
+        let mut connection_array = [const { None }; 64];
+
+        enum_conn
+            .Next(&mut connection_array, &mut fetched_count)
+            .map_err(error_map)?;
+        for conn in connection_array.into_iter().flatten() {
+            if let Ok(props) = conn.GetProperties() {
+                if (*props).guidId == guid {
+                    conn.Rename(&windows::core::HSTRING::from(name))
+                        .map_err(error_map)?;
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn set_interface_metric(index: u32, metric: u32) -> io::Result<()> {
