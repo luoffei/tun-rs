@@ -29,7 +29,9 @@ use windows::Win32::NetworkManagement::IpHelper::{
     MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-use windows::Win32::NetworkManagement::WindowsFirewall::{INetConnectionManager, NCME_DEFAULT};
+use windows::Win32::NetworkManagement::WindowsFirewall::{
+    INetConnection, INetConnectionManager, NCME_DEFAULT,
+};
 use windows::Win32::Networking::WinSock::{
     NlroManual, AF_INET, AF_INET6, AF_UNSPEC, MIB_IPPROTO_NETMGMT,
 };
@@ -750,7 +752,7 @@ pub fn set_interface_name(luid: NET_LUID_LH, name: &str) -> io::Result<()> {
         let enum_conn = manager.EnumConnections(NCME_DEFAULT).map_err(error_map)?;
 
         let mut fetched_count: u32 = 0;
-        let mut connection_array = [const { None }; 64];
+        let mut connection_array: [Option<INetConnection>; 64] = std::array::from_fn(|_| None);
 
         enum_conn
             .Next(&mut connection_array, &mut fetched_count)
