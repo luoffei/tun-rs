@@ -55,7 +55,7 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> io::Result<()> {
         } else {
             &out.stderr
         });
-        let info = format!("{} failed with: \"{}\"", command, err);
+        let info = format!("{command} failed with: \"{err}\"");
         return Err(io::Error::other(info));
     }
     Ok(())
@@ -64,9 +64,8 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> io::Result<()> {
 pub struct Tap {
     s_bpf_fd: Fd,
     s_ndrv_fd: Fd,
-    dev_feth: Feth,
-    #[allow(dead_code)]
     peer_feth: Feth,
+    dev_feth: Feth,
     buffer: Mutex<VecDeque<BytesMut>>,
 }
 struct Feth {
@@ -93,6 +92,7 @@ impl Tap {
         unsafe {
             let s_ndrv_fd = libc::socket(libc::AF_NDRV, libc::SOCK_RAW, 0);
             let s_ndrv_fd = Fd::new(s_ndrv_fd)?;
+            _ = s_ndrv_fd.set_cloexec();
             let mut ifr = new_ifreq(config.dev_name.as_ref())?;
             if let Err(e) = siocifcreate(s_ndrv_fd.inner, &mut ifr) {
                 if e != Errno::EEXIST || !config.reuse_dev.unwrap_or(true) {
@@ -320,9 +320,69 @@ impl Tap {
         }
         Ok(pos)
     }
-    #[cfg(feature = "experimental")]
-    pub(crate) fn shutdown(&self) -> io::Result<()> {
-        self.s_bpf_fd.shutdown()
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn read_interruptible(
+        &self,
+        buf: &mut [u8],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        loop {
+            self.wait_readable_interruptible(event)?;
+            match self.recv(buf) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                rs => return rs,
+            }
+        }
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn readv_interruptible(
+        &self,
+        bufs: &mut [IoSliceMut<'_>],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        loop {
+            self.wait_readable_interruptible(event)?;
+            match self.recv_vectored(bufs) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                rs => return rs,
+            }
+        }
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn wait_readable_interruptible(
+        &self,
+        event: &crate::InterruptEvent,
+    ) -> io::Result<()> {
+        self.s_bpf_fd.wait_readable_interruptible(event)
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn write_interruptible(
+        &self,
+        buf: &[u8],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        self.s_ndrv_fd.write_interruptible(buf, event)
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn writev_interruptible(
+        &self,
+        bufs: &[IoSlice<'_>],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        self.s_ndrv_fd.writev_interruptible(bufs, event)
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn wait_writable_interruptible(
+        &self,
+        event: &crate::InterruptEvent,
+    ) -> io::Result<()> {
+        self.s_ndrv_fd.wait_writable_interruptible(event)
     }
 }
 impl AsRawFd for Tap {
@@ -333,10 +393,11 @@ impl AsRawFd for Tap {
 
 fn open_bpf() -> io::Result<Fd> {
     for i in 1..5000 {
-        let path = CString::new(format!("/dev/bpf{}", i).into_bytes())?;
+        let path = CString::new(format!("/dev/bpf{i}").into_bytes())?;
         let bpf_fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR) };
         match Fd::new(bpf_fd) {
             Ok(fd) => {
+                _ = fd.set_cloexec();
                 return Ok(fd);
             }
             Err(e) => {

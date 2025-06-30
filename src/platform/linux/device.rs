@@ -79,7 +79,11 @@ impl DeviceImpl {
                 | if multi_queue { iff_multi_queue } else { 0 }
                 | if offload { iff_vnet_hdr } else { 0 };
 
-            let fd = libc::open(c"/dev/net/tun".as_ptr() as *const _, O_RDWR, 0);
+            let fd = libc::open(
+                c"/dev/net/tun".as_ptr() as *const _,
+                O_RDWR | libc::O_CLOEXEC,
+                0,
+            );
             let tun_fd = Fd::new(fd)?;
             if let Err(err) = tunsetiff(tun_fd.inner, &mut req as *mut _ as *mut _) {
                 return Err(io::Error::from(err));
@@ -124,13 +128,13 @@ impl DeviceImpl {
             .map(|_| ())
             .map_err(|e| e.into())
     }
-    pub(crate) fn from_tun(tun: Tun) -> Self {
-        Self {
+    pub(crate) fn from_tun(tun: Tun) -> io::Result<Self> {
+        Ok(Self {
             tun,
             vnet_hdr: false,
             udp_gso: false,
             flags: 0,
-        }
+        })
     }
 
     /// # Prerequisites
@@ -150,7 +154,10 @@ impl DeviceImpl {
         unsafe {
             let mut req = self.request()?;
             req.ifr_ifru.ifru_flags = flags;
-            let fd = libc::open(c"/dev/net/tun".as_ptr() as *const _, O_RDWR);
+            let fd = libc::open(
+                c"/dev/net/tun".as_ptr() as *const _,
+                O_RDWR | libc::O_CLOEXEC,
+            );
             let tun_fd = Fd::new(fd)?;
             if let Err(err) = tunsetiff(tun_fd.inner, &mut req as *mut _ as *mut _) {
                 return Err(io::Error::from(err));
@@ -252,7 +259,16 @@ impl DeviceImpl {
         &self,
         gro_table: &mut GROTable,
         bufs: &mut [B],
+        offset: usize,
+    ) -> io::Result<usize> {
+        self.send_multiple0(gro_table, bufs, offset, |tun, buf| tun.send(buf))
+    }
+    pub(crate) fn send_multiple0<B: ExpandBuffer, W: FnMut(&Tun, &[u8]) -> io::Result<usize>>(
+        &self,
+        gro_table: &mut GROTable,
+        bufs: &mut [B],
         mut offset: usize,
+        mut write_f: W,
     ) -> io::Result<usize> {
         gro_table.reset();
         if self.vnet_hdr {
@@ -274,7 +290,7 @@ impl DeviceImpl {
         let mut total = 0;
         let mut err = Ok(());
         for buf_idx in &gro_table.to_write {
-            match self.send(&bufs[*buf_idx].as_ref()[offset..]) {
+            match write_f(&self.tun, &bufs[*buf_idx].as_ref()[offset..]) {
                 Ok(n) => {
                     total += n;
                 }
@@ -304,18 +320,30 @@ impl DeviceImpl {
         sizes: &mut [usize],
         offset: usize,
     ) -> io::Result<usize> {
+        self.recv_multiple0(original_buffer, bufs, sizes, offset, |tun, buf| {
+            tun.recv(buf)
+        })
+    }
+    pub(crate) fn recv_multiple0<
+        B: AsRef<[u8]> + AsMut<[u8]>,
+        R: Fn(&Tun, &mut [u8]) -> io::Result<usize>,
+    >(
+        &self,
+        original_buffer: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+        read_f: R,
+    ) -> io::Result<usize> {
         if bufs.is_empty() || bufs.len() != sizes.len() {
-            return Err(io::Error::new(io::ErrorKind::Other, "bufs error"));
+            return Err(io::Error::other("bufs error"));
         }
         if self.vnet_hdr {
-            let len = self.recv(original_buffer)?;
+            let len = read_f(&self.tun, original_buffer)?;
             if len <= VIRTIO_NET_HDR_LEN {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
-                    ),
-                ))?
+                Err(io::Error::other(format!(
+                    "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
+                )))?
             }
             let hdr = VirtioNetHdr::decode(&original_buffer[..VIRTIO_NET_HDR_LEN])?;
             self.handle_virtio_read(
@@ -326,7 +354,7 @@ impl DeviceImpl {
                 offset,
             )
         } else {
-            let len = self.recv(bufs[0].as_mut())?;
+            let len = read_f(&self.tun, &mut bufs[0].as_mut()[offset..])?;
             sizes[0] = len;
             Ok(1)
         }
@@ -352,13 +380,10 @@ impl DeviceImpl {
                 gso_none_checksum(input, hdr.csum_start, hdr.csum_offset);
             }
             if bufs[0].as_ref()[offset..].len() < len {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "read len {len} overflows bufs element len {}",
-                        bufs[0].as_ref().len()
-                    ),
-                ))?
+                Err(io::Error::other(format!(
+                    "read len {len} overflows bufs element len {}",
+                    bufs[0].as_ref().len()
+                )))?
             }
             sizes[0] = len;
             bufs[0].as_mut()[offset..offset + len].copy_from_slice(input);
@@ -368,10 +393,10 @@ impl DeviceImpl {
             && hdr.gso_type != VIRTIO_NET_HDR_GSO_TCPV6
             && hdr.gso_type != VIRTIO_NET_HDR_GSO_UDP_L4
         {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("unsupported virtio GSO type: {}", hdr.gso_type),
-            ))?
+            Err(io::Error::other(format!(
+                "unsupported virtio GSO type: {}",
+                hdr.gso_type
+            )))?
         }
         let ip_version = input[0] >> 4;
         match ip_version {
@@ -379,26 +404,25 @@ impl DeviceImpl {
                 if hdr.gso_type != VIRTIO_NET_HDR_GSO_TCPV4
                     && hdr.gso_type != VIRTIO_NET_HDR_GSO_UDP_L4
                 {
-                    Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("ip header version: 4, GSO type: {}", hdr.gso_type),
-                    ))?
+                    Err(io::Error::other(format!(
+                        "ip header version: 4, GSO type: {}",
+                        hdr.gso_type
+                    )))?
                 }
             }
             6 => {
                 if hdr.gso_type != VIRTIO_NET_HDR_GSO_TCPV6
                     && hdr.gso_type != VIRTIO_NET_HDR_GSO_UDP_L4
                 {
-                    Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("ip header version: 6, GSO type: {}", hdr.gso_type),
-                    ))?
+                    Err(io::Error::other(format!(
+                        "ip header version: 6, GSO type: {}",
+                        hdr.gso_type
+                    )))?
                 }
             }
-            ip_version => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("invalid ip header version: {}", ip_version),
-            ))?,
+            ip_version => Err(io::Error::other(format!(
+                "invalid ip header version: {ip_version}"
+            )))?,
         }
         // Don't trust hdr.hdrLen from the kernel as it can be equal to the length
         // of the entire first packet when the kernel is handling it as part of a
@@ -408,46 +432,36 @@ impl DeviceImpl {
             hdr.hdr_len = hdr.csum_start + 8
         } else {
             if len <= hdr.csum_start as usize + 12 {
-                Err(io::Error::new(io::ErrorKind::Other, "packet is too short"))?
+                Err(io::Error::other("packet is too short"))?
             }
 
             let tcp_h_len = ((input[hdr.csum_start as usize + 12] as u16) >> 4) * 4;
             if !(20..=60).contains(&tcp_h_len) {
                 // A TCP header must be between 20 and 60 bytes in length.
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("tcp header len is invalid: {tcp_h_len}"),
-                ))?
+                Err(io::Error::other(format!(
+                    "tcp header len is invalid: {tcp_h_len}"
+                )))?
             }
             hdr.hdr_len = hdr.csum_start + tcp_h_len
         }
         if len < hdr.hdr_len as usize {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "length of packet ({len}) < virtioNetHdr.hdr_len ({})",
-                    hdr.hdr_len
-                ),
-            ))?
+            Err(io::Error::other(format!(
+                "length of packet ({len}) < virtioNetHdr.hdr_len ({})",
+                hdr.hdr_len
+            )))?
         }
         if hdr.hdr_len < hdr.csum_start {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "virtioNetHdr.hdrLen ({}) < virtioNetHdr.csumStart ({})",
-                    hdr.hdr_len, hdr.csum_start
-                ),
-            ))?
+            Err(io::Error::other(format!(
+                "virtioNetHdr.hdrLen ({}) < virtioNetHdr.csumStart ({})",
+                hdr.hdr_len, hdr.csum_start
+            )))?
         }
         let c_sum_at = (hdr.csum_start + hdr.csum_offset) as usize;
         if c_sum_at + 1 >= len {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "end of checksum offset ({}) exceeds packet length ({len})",
-                    c_sum_at + 1,
-                ),
-            ))?
+            Err(io::Error::other(format!(
+                "end of checksum offset ({}) exceeds packet length ({len})",
+                c_sum_at + 1,
+            )))?
         }
         gso_split(input, hdr, bufs, sizes, offset, ip_version == 6)
     }
@@ -739,7 +753,7 @@ impl DeviceImpl {
     /// An error is returned if the MAC address cannot be found.
     pub fn mac_address(&self) -> io::Result<[u8; ETHER_ADDR_LEN as usize]> {
         let mac = mac_address_by_name(&self.name()?)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+            .map_err(|e| io::Error::other(e.to_string()))?
             .ok_or(io::Error::from(io::ErrorKind::NotFound))?;
         Ok(mac.bytes())
     }

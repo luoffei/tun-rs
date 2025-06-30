@@ -8,14 +8,16 @@ use std::sync::Arc;
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "freebsd",
-    target_os = "macos"
+    target_os = "macos",
+    target_os = "openbsd",
 ))]
 use tun_rs::DeviceBuilder;
 #[cfg(any(
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "freebsd",
-    target_os = "macos"
+    target_os = "macos",
+    target_os = "openbsd",
 ))]
 use tun_rs::Layer;
 
@@ -25,27 +27,23 @@ mod protocol_handle;
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "freebsd",
-    target_os = "macos"
+    target_os = "macos",
+    target_os = "openbsd",
 ))]
 #[tokio::main]
 async fn main() -> io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init();
-    let (tx, mut quit) = tokio::sync::mpsc::channel::<()>(1);
-
-    ctrlc2::set_async_handler(async move {
-        tx.send(()).await.expect("Signal error");
-    })
-    .await;
     let dev = DeviceBuilder::new()
         // .name("feth0")
         .ipv4(Ipv4Addr::from([10, 0, 0, 9]), 24, None)
         .layer(Layer::L2)
         .mtu(1400)
         .build_async()?;
+    println!("mac address = {:?}", dev.mac_address());
     let mut buf = vec![0; 14 + 65536];
     loop {
         tokio::select! {
-            _ = quit.recv() => {
+            _ = tokio::signal::ctrl_c() => {
                 println!("Quit...");
                 break;
             }
@@ -63,7 +61,7 @@ async fn main() -> io::Result<()> {
                                 }
                             }
                             protocol=>{
-                                 println!("ignore ether protocol: {}", protocol)
+                                 println!("ignore ether protocol: {protocol}", )
                             }
                         }
                 }

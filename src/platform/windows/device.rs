@@ -1,17 +1,14 @@
+use crate::builder::DeviceConfig;
+use crate::platform::windows::tap::TapDevice;
+use crate::platform::windows::tun::{check_adapter_if_orphaned_devices, TunDevice};
+use crate::platform::ETHER_ADDR_LEN;
+use crate::{Layer, ToIpv4Address, ToIpv4Netmask, ToIpv6Address, ToIpv6Netmask};
 use getifaddrs::Interface;
 use std::collections::HashSet;
 use std::io;
 use std::net::IpAddr;
-use std::os::windows::io::OwnedHandle;
 use windows::core::GUID;
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-
-use crate::builder::DeviceConfig;
-use crate::platform::windows::tap::TapDevice;
-use crate::platform::windows::tun::TunDevice;
-use crate::platform::ETHER_ADDR_LEN;
-use crate::windows::tun::check_adapter_if_orphaned_devices;
-use crate::{Layer, ToIpv4Address, ToIpv4Netmask, ToIpv6Address, ToIpv6Netmask};
 
 pub(crate) const GUID_NETWORK_ADAPTER: GUID = GUID {
     data1: 0x4d36e972,
@@ -99,10 +96,11 @@ impl DeviceImpl {
                             "The network adapter [{name}] already exists."
                         )))?
                     }
-                    let tap = TapDevice::open(HARDWARE_ID, name, persist)?;
+                    let tap =
+                        TapDevice::open(HARDWARE_ID, name, persist, config.mac_address.as_ref())?;
                     break tap;
                 }
-                let tap = TapDevice::create(HARDWARE_ID, persist)?;
+                let tap = TapDevice::create(HARDWARE_ID, persist, config.mac_address.as_ref())?;
                 if let Err(e) = tap.set_name(name) {
                     if config.dev_name.is_some() {
                         Err(e)?
@@ -118,11 +116,37 @@ impl DeviceImpl {
         };
         Ok(device)
     }
-    #[allow(dead_code)]
-    pub(crate) fn wait_readable_cancelable(&self, cancel_event: &OwnedHandle) -> io::Result<()> {
+    #[cfg(any(
+        feature = "interruptible",
+        feature = "async_tokio",
+        feature = "async_io"
+    ))]
+    pub(crate) fn wait_readable_interruptible(
+        &self,
+        event: &crate::platform::windows::InterruptEvent,
+    ) -> io::Result<()> {
         match &self.driver {
-            Driver::Tap(tap) => tap.wait_readable_cancelable(cancel_event),
-            Driver::Tun(tun) => tun.wait_readable_cancelable(cancel_event),
+            Driver::Tap(tap) => tap.wait_readable_interruptible(&event.handle),
+            Driver::Tun(tun) => tun.wait_readable_interruptible(&event.handle),
+        }
+    }
+    #[cfg(feature = "interruptible")]
+    pub(crate) fn read_interruptible(
+        &self,
+        buf: &mut [u8],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        loop {
+            self.wait_readable_interruptible(event)?;
+            match self.try_recv(buf) {
+                Ok(rs) => {
+                    return Ok(rs);
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
     /// Recv a packet from tun device
@@ -146,15 +170,19 @@ impl DeviceImpl {
             Driver::Tun(tun) => tun.send(buf),
         }
     }
-    #[cfg(any(feature = "async_tokio", feature = "async_io"))]
-    pub(crate) fn send_cancelable(
+    #[cfg(any(
+        feature = "interruptible",
+        feature = "async_tokio",
+        feature = "async_io"
+    ))]
+    pub(crate) fn write_interruptible(
         &self,
         buf: &[u8],
-        cancel_event: &OwnedHandle,
+        event: &crate::platform::windows::InterruptEvent,
     ) -> io::Result<usize> {
         match &self.driver {
-            Driver::Tap(tap) => tap.write_cancelable(buf, cancel_event),
-            Driver::Tun(tun) => tun.send_cancelable(buf, cancel_event),
+            Driver::Tap(tap) => tap.write_interruptible(buf, &event.handle),
+            Driver::Tun(tun) => tun.send_interruptible(buf, &event.handle),
         }
     }
     pub(crate) fn try_send(&self, buf: &[u8]) -> io::Result<usize> {

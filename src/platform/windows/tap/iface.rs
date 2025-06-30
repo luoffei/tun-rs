@@ -1,8 +1,9 @@
+use crate::platform::windows::device::GUID_NETWORK_ADAPTER;
 use crate::platform::windows::ffi;
-use crate::windows::device::GUID_NETWORK_ADAPTER;
 use scopeguard::{defer, guard, ScopeGuard};
 use std::io;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::process::Command;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     DICD_GENERATE_ID, DICS_FLAG_GLOBAL, DIF_INSTALLDEVICE, DIF_INSTALLINTERFACES,
     DIF_REGISTERDEVICE, DIF_REGISTER_COINSTALLERS, DIF_REMOVE, DIGCF_PRESENT, DIREG_DRV,
@@ -14,6 +15,8 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_SYSTEM, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Registry::{KEY_NOTIFY, KEY_QUERY_VALUE, REG_NOTIFY_CHANGE_NAME};
+use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WRITE};
+use winreg::RegKey;
 
 #[repr(C, align(1))]
 #[derive(c2rust_bitfields::BitfieldStruct)]
@@ -277,7 +280,7 @@ pub fn delete_interface(component_id: &str, luid: &NET_LUID_LH) -> io::Result<()
 pub fn open_interface(luid: &NET_LUID_LH) -> io::Result<OwnedHandle> {
     let guid = ffi::luid_to_guid(luid).and_then(|guid| ffi::string_from_guid(&guid))?;
 
-    let path = format!(r"\\.\Global\{}.tap", guid);
+    let path = format!(r"\\.\Global\{guid}.tap");
 
     let handle = ffi::create_file(
         &path,
@@ -287,4 +290,52 @@ pub fn open_interface(luid: &NET_LUID_LH) -> io::Result<OwnedHandle> {
         FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED,
     )?;
     unsafe { Ok(OwnedHandle::from_raw_handle(handle.0)) }
+}
+
+pub fn set_adapter_mac_by_guid(adapter_guid: &str, new_mac: &str) -> io::Result<()> {
+    let class_path =
+        r"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}";
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let class = hklm.open_subkey_with_flags(class_path, KEY_READ | KEY_WRITE)?;
+
+    let mut found = false;
+    for i in 0..256 {
+        let subkey_name = format!("{i:04}");
+        if let Ok(subkey) = class.open_subkey_with_flags(&subkey_name, KEY_READ | KEY_WRITE) {
+            let guid: String = subkey.get_value("NetCfgInstanceId").unwrap_or_default();
+            if guid.eq_ignore_ascii_case(adapter_guid) {
+                let subkey =
+                    class.open_subkey_with_flags(&subkey_name, KEY_SET_VALUE | KEY_WRITE)?;
+                subkey.set_value("NetworkAddress", &new_mac)?;
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if !found {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Registry entry not found for given adapter GUID",
+        ));
+    }
+
+    Ok(())
+}
+pub fn enable_adapter(adapter_name: &str, val: bool) -> io::Result<()> {
+    let out = Command::new("wmic")
+        .args([
+            "path",
+            "win32_networkadapter",
+            "where",
+            &format!("NetConnectionID='{adapter_name}'",),
+            "call",
+            if val { "enable" } else { "disable" },
+        ])
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("Failed to enable adapter"))
+    }
 }

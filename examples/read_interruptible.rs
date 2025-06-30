@@ -9,10 +9,12 @@ use std::sync::Arc;
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "freebsd",
-    target_os = "macos",
     target_os = "openbsd",
+    target_os = "macos"
 ))]
 use tun_rs::DeviceBuilder;
+#[allow(unused_imports)]
+use tun_rs::InterruptEvent;
 #[cfg(any(
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos")),
@@ -56,42 +58,41 @@ fn main_entry(quit: Receiver<()>) -> Result<(), std::io::Error> {
     use std::net::IpAddr;
     let dev = Arc::new(
         DeviceBuilder::new()
-            // .name("utun7")
             .ipv4(Ipv4Addr::new(10, 0, 0, 12), 24, None)
-            // .ipv4(Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(255, 255, 255, 0), None)
-            .ipv6("CDCD:910A:2222:5498:8475:1111:3900:2021", 64)
-            // .multi_queue(true)
             .mtu(1400)
-            // .ipv6(
-            //     "CDCD:910A:2222:5498:8475:1111:3900:2021",
-            //     "FFFF:FFFF:FFFF:FFFF:0000:0000:0000:0000",
-            // )
-            // .ipv6_tuple(&[( "CDCD:910A:2222:5498:8475:1111:3900:2022",64),
-            //                ( "CDCD:910A:2222:5498:8475:1111:3900:2023",64)])
             .build_sync()?,
     );
-    // // linux multi queue
-    // let device = dev.try_clone().unwrap();
-    // println!("clone {:?}", device.name());
-    println!("addr {:?}", dev.addresses());
 
     println!("if_index = {:?}", dev.if_index());
-    println!("mtu = {:?}", dev.mtu());
-    #[cfg(windows)]
-    {
-        dev.set_mtu_v6(2000)?;
-        println!("mtu ipv6 = {:?}", dev.mtu_v6());
-        println!("version = {:?}", dev.version());
-    }
-    let _join = std::thread::spawn(move || {
+    #[cfg(unix)]
+    dev.set_nonblocking(true)?;
+
+    let event = Arc::new(InterruptEvent::new()?);
+    let event_clone = event.clone();
+    let join = std::thread::spawn(move || {
         let mut buf = [0; 4096];
         loop {
-            let amount = dev.recv(&mut buf)?;
-            println!("{:?}", &buf[0..amount]);
+            match dev.recv_intr(&mut buf, &event_clone) {
+                Ok(len) => {
+                    println!("read_interruptible Ok({len})");
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    // If the interrupt event is to be reused, it must be reset before the next wait.
+                    if event_clone.is_trigger() {
+                        event_clone.reset().unwrap();
+                        println!("read_interruptible Err({e:?})");
+                    }
+                    return;
+                }
+                Err(e) => {
+                    println!("Error: {e:?}");
+                    return;
+                }
+            }
         }
-        #[allow(unreachable_code)]
-        std::io::Result::Ok(())
     });
     _ = quit.recv();
+    event.trigger()?;
+    join.join().unwrap();
     Ok(())
 }

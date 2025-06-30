@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{io, ptr};
 
-use windows::core::HRESULT;
+use windows::core::{GUID, HRESULT};
 use windows::Win32::Foundation::{
     GetLastError, ERROR_BUFFER_OVERFLOW, ERROR_HANDLE_EOF, ERROR_INVALID_DATA, ERROR_NO_MORE_ITEMS,
     HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
@@ -144,10 +144,10 @@ impl WinTunAdapter {
             u16::from_be_bytes([v[2], v[3]])
         ))
     }
-    fn send(&self, buf: &[u8], cancel_event: Option<&OwnedHandle>) -> io::Result<usize> {
+    fn send(&self, buf: &[u8], event: Option<&OwnedHandle>) -> io::Result<usize> {
         let guard = self.session.read().unwrap();
         if let Some(session) = guard.as_ref() {
-            return session.send(buf, &self.state, cancel_event);
+            return session.send(buf, &self.state, event);
         }
         Err(io::Error::other("The interface has been disabled"))
     }
@@ -172,10 +172,10 @@ impl WinTunAdapter {
         }
         Err(io::Error::other("The interface has been disabled"))
     }
-    fn wait_readable_cancelable(&self, cancel_event: &OwnedHandle) -> io::Result<()> {
+    fn wait_readable_interruptible(&self, interrupt_event: &OwnedHandle) -> io::Result<()> {
         let guard = self.session.read().unwrap();
         if let Some(session) = guard.as_ref() {
-            return session.wait_readable_cancelable(&self.event, cancel_event);
+            return session.wait_readable_interruptible(&self.event, interrupt_event);
         }
         Err(io::Error::other("The interface has been disabled"))
     }
@@ -190,12 +190,7 @@ impl Drop for WinTunSession {
 }
 
 impl WinTunSession {
-    fn send(
-        &self,
-        buf: &[u8],
-        state: &State,
-        cancel_event: Option<&OwnedHandle>,
-    ) -> io::Result<usize> {
+    fn send(&self, buf: &[u8], state: &State, event: Option<&OwnedHandle>) -> io::Result<usize> {
         let mut count = 0;
         loop {
             return match self.try_send(buf) {
@@ -206,9 +201,12 @@ impl WinTunSession {
                     if count > 50 {
                         return Err(io::Error::from(io::ErrorKind::TimedOut));
                     }
-                    if let Some(cancel_event) = cancel_event {
-                        if ffi::wait_for_single_object(cancel_event.as_raw_handle(), 0).is_ok() {
-                            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancel"));
+                    if let Some(event) = event {
+                        if ffi::wait_for_single_object(event.as_raw_handle(), 0).is_ok() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Interrupted,
+                                "trigger interrupt",
+                            ));
                         }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -280,16 +278,16 @@ impl WinTunSession {
         unsafe { win_tun.WintunReleaseReceivePacket(handle, ptr) };
         Ok(size)
     }
-    fn wait_readable_cancelable(
+    fn wait_readable_interruptible(
         &self,
         inner_event: &OwnedHandle,
-        cancel_event: &OwnedHandle,
+        interrupt_event: &OwnedHandle,
     ) -> io::Result<()> {
         //Wait on both the read handle and the shutdown handle so that we stop when requested
         let handles = [
             HANDLE(self.read_event),
             HANDLE(inner_event.as_raw_handle()),
-            HANDLE(cancel_event.as_raw_handle()),
+            HANDLE(interrupt_event.as_raw_handle()),
         ];
         let result = unsafe {
             //SAFETY: We abide by the requirements of WaitForMultipleObjects, handles is a
@@ -305,7 +303,10 @@ impl WinTunSession {
                 } else if result.0 == WAIT_OBJECT_0.0 + 1 {
                     Err(io::Error::other("The interface has been disabled"))
                 } else if result.0 == WAIT_OBJECT_0.0 + 2 {
-                    Err(io::Error::new(io::ErrorKind::Interrupted, "cancel"))
+                    Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "trigger interrupt",
+                    ))
                 } else {
                     Err(io::Error::last_os_error())
                 }
@@ -416,12 +417,15 @@ impl TunDevice {
             //SAFETY: guid is a unique integer so transmuting either all zeroes or the user's preferred
             //guid to the wintun_raw guid type is safe and will allow the windows kernel to see our GUID
 
-            let guid_ptr = guid
-                .map(|guid| {
-                    let guid_struct: wintun_raw::GUID = std::mem::transmute(guid);
-                    &guid_struct as *const wintun_raw::GUID
-                })
-                .unwrap_or(ptr::null());
+            let guid = guid.map(|guid| {
+                let guid = GUID::from_u128(guid);
+                wintun_raw::GUID {
+                    Data1: guid.data1,
+                    Data2: guid.data2,
+                    Data3: guid.data3,
+                    Data4: guid.data4,
+                }
+            });
 
             //SAFETY: the function is loaded from the wintun dll properly, we are providing valid
             //pointers, and all the strings are correct null terminated UTF-16. This safety rationale
@@ -429,7 +433,7 @@ impl TunDevice {
             let adapter = win_tun.WintunCreateAdapter(
                 name_utf16.as_ptr(),
                 description_utf16.as_ptr(),
-                guid_ptr,
+                guid.as_ref().map_or(ptr::null(), |guid| guid as *const _),
             );
             if adapter.is_null() {
                 Err(io::Error::last_os_error())?
@@ -470,16 +474,17 @@ impl TunDevice {
         self.win_tun_adapter.send(buf, None)
     }
 
-    #[cfg(any(feature = "async_tokio", feature = "async_io"))]
-    pub(crate) fn send_cancelable(
-        &self,
-        buf: &[u8],
-        cancel_event: &OwnedHandle,
-    ) -> io::Result<usize> {
-        self.win_tun_adapter.send(buf, Some(cancel_event))
+    #[allow(dead_code)]
+    pub(crate) fn send_interruptible(&self, buf: &[u8], event: &OwnedHandle) -> io::Result<usize> {
+        self.win_tun_adapter.send(buf, Some(event))
     }
-    pub(crate) fn wait_readable_cancelable(&self, cancel_event: &OwnedHandle) -> io::Result<()> {
-        self.win_tun_adapter.wait_readable_cancelable(cancel_event)
+    #[allow(dead_code)]
+    pub(crate) fn wait_readable_interruptible(
+        &self,
+        interrupt_event: &OwnedHandle,
+    ) -> io::Result<()> {
+        self.win_tun_adapter
+            .wait_readable_interruptible(interrupt_event)
     }
     pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.win_tun_adapter.recv(buf)

@@ -1,12 +1,12 @@
 [package]
 name = "tun-rs"
-version = "2.2.0"
+version = "2.4.2"
 edition = "2021"
 authors = ["xmh0511, vnt-dev"]
 license = "Apache-2.0"
 description = "Cross-platform Tun and Tap library"
 repository = "https://github.com/tun-rs/tun-rs"
-keywords = ["tun", "tap", "network", "tunnel"]
+keywords = ["tun", "tap", "tunnel", "VPN", "network-interface"]
 
 [lib]
 crate-type = ["staticlib", "cdylib", "lib"]
@@ -26,12 +26,12 @@ async-io = { version = "2.3", optional = true }
 
 ipnet = "2"
 byteorder = "1.5.0"
-getifaddrs = "0.1.5"
+getifaddrs = "0.2.0"
 
 futures-core = { version = "0.3", optional = true }
 futures = { version = "0.3", optional = true }
 
-[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "android", target_os="freebsd"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "android", target_os="freebsd", target_os="openbsd"))'.dependencies]
 nix = { version = "0.30", features = ["ioctl"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -41,7 +41,7 @@ scopeguard = "1.2.0"
 winreg = "0.55"
 widestring = "1.0.2"
 c2rust-bitfields = "0.20"
-windows = { version = "0.59", features = [
+windows = { version = "0.60", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
@@ -64,18 +64,18 @@ windows = { version = "0.59", features = [
 ] }
 libloading = "0.8"
 
-[target.'cfg(any(target_os = "macos", target_os = "freebsd"))'.dependencies]
-route_manager = "0.1.4"
+[target.'cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
+route_manager = "0.2.0"
 
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd",target_os = "windows"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd",target_os = "windows"))'.dependencies]
 mac_address = "1.1.7"
 
 [build-dependencies]
-bindgen = "0.71.1"
+bindgen = "0.72.0"
 
 [dev-dependencies]
-ctrlc2 = { version = "3", features = ["tokio", "termination"] }
+ctrlc2 = { version = "3.7", features = ["tokio", "termination"] }
 env_logger = "0.11"
 futures = "0.3"
 pnet_packet = "0.35.0"
@@ -84,12 +84,12 @@ async-std = { version = "1", features = ["attributes", "unstable"] }
 async-ctrlc = "1.2.0"
 
 [features]
-defalt = ["async"]
 async = ["async_tokio"]
 async_std = ["async_io"]
 async_tokio = ["blocking", "tokio"]
 async_io = ["blocking", "async-io"]
 async_framed = ["futures", "futures-core"]
+interruptible = []
 experimental = []
 
 [package.metadata.docs.rs]
@@ -121,3 +121,7 @@ required-features = ["async_tokio"]
 [[example]]
 name = "async_tap"
 required-features = ["async_tokio"]
+
+[[example]]
+name = "read_interruptible"
+required-features = ["interruptible"]

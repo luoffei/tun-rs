@@ -3,16 +3,17 @@ use crate::platform::DeviceImpl;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "macos",
-    target_os = "freebsd"
+    target_os = "freebsd",
+    target_os = "openbsd",
 ))]
 use libc::{AF_INET, AF_INET6, SOCK_DGRAM};
 use std::io;
 use std::io::{IoSlice, IoSliceMut};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, RawFd};
 
 impl FromRawFd for DeviceImpl {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        DeviceImpl::from_fd(fd)
+        DeviceImpl::from_fd(fd).unwrap()
     }
 }
 impl AsRawFd for DeviceImpl {
@@ -25,8 +26,8 @@ impl AsFd for DeviceImpl {
         unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
     }
 }
-
-impl IntoRawFd for DeviceImpl {
+#[cfg(not(target_os = "freebsd"))]
+impl std::os::unix::io::IntoRawFd for DeviceImpl {
     fn into_raw_fd(self) -> RawFd {
         self.tun.into_raw_fd()
     }
@@ -34,7 +35,7 @@ impl IntoRawFd for DeviceImpl {
 impl DeviceImpl {
     /// # Safety
     /// The fd passed in must be an owned file descriptor; in particular, it must be open.
-    pub(crate) unsafe fn from_fd(fd: RawFd) -> Self {
+    pub(crate) unsafe fn from_fd(fd: RawFd) -> io::Result<Self> {
         let tun = Fd::new_unchecked(fd);
         DeviceImpl::from_tun(Tun::new(tun))
     }
@@ -61,16 +62,61 @@ impl DeviceImpl {
     pub(crate) fn send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         self.tun.send_vectored(bufs)
     }
-    #[cfg_attr(docsrs, doc(cfg(feature = "experimental")))]
-    #[cfg(feature = "experimental")]
-    pub(crate) fn shutdown(&self) -> io::Result<()> {
-        self.tun.shutdown()
+    #[cfg(feature = "interruptible")]
+    pub(crate) fn read_interruptible(
+        &self,
+        buf: &mut [u8],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        self.tun.read_interruptible(buf, event)
+    }
+    #[cfg(feature = "interruptible")]
+    pub(crate) fn readv_interruptible(
+        &self,
+        bufs: &mut [IoSliceMut<'_>],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        self.tun.readv_interruptible(bufs, event)
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn wait_readable_interruptible(
+        &self,
+        event: &crate::InterruptEvent,
+    ) -> io::Result<()> {
+        self.tun.wait_readable_interruptible(event)
+    }
+    #[cfg(feature = "interruptible")]
+    pub(crate) fn write_interruptible(
+        &self,
+        buf: &[u8],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        self.tun.write_interruptible(buf, event)
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn writev_interruptible(
+        &self,
+        bufs: &[IoSlice<'_>],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        self.tun.writev_interruptible(bufs, event)
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn wait_writable_interruptible(
+        &self,
+        event: &crate::InterruptEvent,
+    ) -> io::Result<()> {
+        self.tun.wait_writable_interruptible(event)
     }
 }
 #[cfg(any(
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "macos",
-    target_os = "freebsd"
+    target_os = "freebsd",
+    target_os = "openbsd",
 ))]
 impl DeviceImpl {
     /// Retrieves the interface index for the network interface.
@@ -122,17 +168,29 @@ impl DeviceImpl {
 }
 #[cfg(any(
     all(target_os = "linux", not(target_env = "ohos")),
-    target_os = "macos",
-    target_os = "freebsd"
+    target_os = "freebsd",
+    target_os = "openbsd",
 ))]
 pub(crate) unsafe fn ctl() -> io::Result<Fd> {
-    Fd::new(libc::socket(AF_INET, SOCK_DGRAM, 0))
+    Fd::new(libc::socket(AF_INET, SOCK_DGRAM | libc::SOCK_CLOEXEC, 0))
+}
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn ctl() -> io::Result<Fd> {
+    let fd = Fd::new(libc::socket(AF_INET, SOCK_DGRAM, 0))?;
+    _ = fd.set_cloexec();
+    Ok(fd)
 }
 #[cfg(any(
     all(target_os = "linux", not(target_env = "ohos")),
-    target_os = "macos",
-    target_os = "freebsd"
+    target_os = "freebsd",
+    target_os = "openbsd",
 ))]
 pub(crate) unsafe fn ctl_v6() -> io::Result<Fd> {
-    Fd::new(libc::socket(AF_INET6, SOCK_DGRAM, 0))
+    Fd::new(libc::socket(AF_INET6, SOCK_DGRAM | libc::SOCK_CLOEXEC, 0))
+}
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn ctl_v6() -> io::Result<Fd> {
+    let fd = Fd::new(libc::socket(AF_INET6, SOCK_DGRAM, 0))?;
+    _ = fd.set_cloexec();
+    Ok(fd)
 }

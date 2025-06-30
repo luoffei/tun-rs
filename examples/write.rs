@@ -8,6 +8,7 @@ use std::sync::{mpsc::Receiver, Arc};
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "macos",
     target_os = "freebsd",
+    target_os = "openbsd",
 ))]
 use tun_rs::DeviceBuilder;
 #[allow(unused_imports)]
@@ -41,6 +42,7 @@ fn main_entry(_quit: Receiver<()>) -> std::io::Result<()> {
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "macos",
     target_os = "freebsd",
+    target_os = "openbsd",
 ))]
 fn main_entry(quit: Receiver<()>) -> std::io::Result<()> {
     let dev = Arc::new(
@@ -53,14 +55,6 @@ fn main_entry(quit: Receiver<()>) -> std::io::Result<()> {
     dev.set_ignore_packet_info(true);
 
     let mut buf = [0; 4096];
-
-    #[cfg(feature = "experimental")]
-    let dev2 = dev.clone();
-    #[cfg(feature = "experimental")]
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        dev2.shutdown().unwrap();
-    });
 
     std::thread::spawn(move || {
         loop {

@@ -53,7 +53,7 @@ impl AsyncDevice {
     /// This method is safe if the provided fd is valid
     /// Construct a AsyncDevice from an existing file descriptor
     pub unsafe fn from_fd(fd: RawFd) -> io::Result<AsyncDevice> {
-        AsyncDevice::new_dev(DeviceImpl::from_fd(fd))
+        AsyncDevice::new_dev(DeviceImpl::from_fd(fd)?)
     }
     pub fn into_fd(self) -> io::Result<RawFd> {
         Ok(self.into_device()?.into_raw_fd())
@@ -179,18 +179,15 @@ impl AsyncDevice {
         offset: usize,
     ) -> io::Result<usize> {
         if bufs.is_empty() || bufs.len() != sizes.len() {
-            return Err(io::Error::new(io::ErrorKind::Other, "bufs error"));
+            return Err(io::Error::other("bufs error"));
         }
         let tun = self.get_ref();
         if tun.vnet_hdr {
             let len = self.recv(original_buffer).await?;
             if len <= VIRTIO_NET_HDR_LEN {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
-                    ),
-                ))?
+                Err(io::Error::other(format!(
+                    "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
+                )))?
             }
             let hdr = VirtioNetHdr::decode(&original_buffer[..VIRTIO_NET_HDR_LEN])?;
             tun.handle_virtio_read(
@@ -201,7 +198,7 @@ impl AsyncDevice {
                 offset,
             )
         } else {
-            let len = self.recv(bufs[0].as_mut()).await?;
+            let len = self.recv(&mut bufs[0].as_mut()[offset..]).await?;
             sizes[0] = len;
             Ok(1)
         }

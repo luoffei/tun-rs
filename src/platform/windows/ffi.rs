@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
 use std::{io, mem, ptr, slice};
 
 use scopeguard::defer;
@@ -17,8 +17,8 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 };
 use windows::Win32::Devices::Properties::DEVPROPID_FIRST_USABLE;
 use windows::Win32::Foundation::{
-    DEVPROPKEY, ERROR_INSUFFICIENT_BUFFER, ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS,
-    ERROR_OBJECT_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    DEVPROPKEY, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, ERROR_OBJECT_ALREADY_EXISTS,
+    HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToAlias, ConvertInterfaceLuidToGuid,
@@ -45,9 +45,7 @@ use windows::Win32::System::Com::{
     RPC_C_IMP_LEVEL_IMPERSONATE,
 };
 use windows::Win32::System::Registry::{RegNotifyChangeKeyValue, HKEY, REG_NOTIFY_FILTER};
-use windows::Win32::System::Threading::{
-    CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
-};
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent, WaitForSingleObject};
 use windows::Win32::System::IO::{
     CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0,
 };
@@ -250,106 +248,10 @@ pub fn cancel_io_overlapped(handle: HANDLE, io_overlapped: &OVERLAPPED) -> io::R
     }
 }
 
-pub fn read_file(
-    handle: HANDLE,
-    buffer: &mut [u8],
-    cancel_event: Option<RawHandle>,
-) -> io::Result<u32> {
-    let mut ret = 0;
-    //https://www.cnblogs.com/linyilong3/archive/2012/05/03/2480451.html
-    unsafe {
-        let mut io_overlapped = io_overlapped();
-        let io_event = create_event()?;
-        io_overlapped.hEvent = HANDLE(io_event.as_raw_handle());
-
-        match ReadFile(
-            handle,
-            Some(buffer),
-            Some(&mut ret),
-            Some(&mut io_overlapped),
-        ) {
-            Ok(_) => Ok(ret),
-            Err(err) => {
-                let err = error_map(err);
-                if err.raw_os_error().unwrap_or(0) == ERROR_IO_PENDING.0 as i32 {
-                    if let Some(cancel_event) = cancel_event {
-                        wait_io_overlapped_cancelable(handle, &io_overlapped, cancel_event)
-                    } else {
-                        wait_io_overlapped(handle, &io_overlapped)
-                    }
-                } else {
-                    Err(err)
-                }
-            }
-        }
-    }
-}
-
-pub fn write_file(
-    handle: HANDLE,
-    buffer: &[u8],
-    cancel_event: Option<RawHandle>,
-) -> io::Result<u32> {
-    let mut ret = 0;
-    let mut io_overlapped = io_overlapped();
-    let io_event = create_event()?;
-    io_overlapped.hEvent = HANDLE(io_event.as_raw_handle());
-    unsafe {
-        match WriteFile(
-            handle,
-            Some(buffer),
-            Some(&mut ret),
-            Some(&mut io_overlapped),
-        ) {
-            Ok(_) => Ok(ret),
-            Err(err) => {
-                let err = error_map(err);
-
-                if err.raw_os_error().unwrap_or(0) == ERROR_IO_PENDING.0 as i32 {
-                    if let Some(cancel_event) = cancel_event {
-                        wait_io_overlapped_cancelable(handle, &io_overlapped, cancel_event)
-                    } else {
-                        wait_io_overlapped(handle, &io_overlapped)
-                    }
-                } else {
-                    Err(err)
-                }
-            }
-        }
-    }
-}
-
 pub fn wait_io_overlapped(handle: HANDLE, io_overlapped: &OVERLAPPED) -> io::Result<u32> {
     let mut ret = 0;
     unsafe { GetOverlappedResult(handle, io_overlapped, &mut ret, true) }.map_err(error_map)?;
     Ok(ret)
-}
-pub fn wait_io_overlapped_cancelable(
-    handle: HANDLE,
-    io_overlapped: &OVERLAPPED,
-    cancel_event: RawHandle,
-) -> io::Result<u32> {
-    let handles = [io_overlapped.hEvent, HANDLE(cancel_event)];
-    unsafe {
-        let wait_ret = WaitForMultipleObjects(&handles, false, INFINITE);
-        match wait_ret {
-            WAIT_OBJECT_0 => {
-                let mut transferred = 0u32;
-                GetOverlappedResult(handle, io_overlapped, &mut transferred, false)
-                    .map_err(error_map)?;
-                Ok(transferred)
-            }
-            _ => {
-                if wait_ret.0 == WAIT_OBJECT_0.0 + 1 {
-                    _ = CancelIoEx(handle, Some(io_overlapped));
-                    _ = WaitForSingleObject(io_overlapped.hEvent, INFINITE);
-                    Err(io::Error::new(io::ErrorKind::Interrupted, "cancel"))
-                } else {
-                    Err(io::Error::last_os_error())
-                }
-            }
-        }
-    }
 }
 
 pub fn create_device_info_list(guid: &GUID) -> io::Result<HDEVINFO> {
